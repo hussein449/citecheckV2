@@ -1,53 +1,40 @@
-/* CiteCheck — a report-like interface: light by default, calm, print-adjacent.
+/* CiteCheck — a light, report-like interface: calm, restrained, print-adjacent.
    Verdict colours are the only saturated ink on the page, so severity reads at
-   a glance without anything else competing for attention. */
+   a glance without anything else competing for attention.
+
+   Deliberately light-only. This is a document you read and show to a client,
+   and it should look the same on every machine regardless of what the viewer's
+   OS theme happens to be set to. */
 
 :root {
-  --bg: #f6f7f9;
+  /* Neutrals: a faintly cool grey ladder, so white panels lift off the page
+     without any border needing to shout. */
+  --bg: #f4f6f8;
   --surface: #ffffff;
-  --surface-2: #f8fafc;
-  --line: #e4e8ee;
-  --line-strong: #cbd5e1;
-  --ink: #101722;
-  --ink-2: #334155;
-  --ink-dim: #667487;
-  --accent: #1d4ed8;
-  --accent-soft: #eef2ff;
+  --surface-2: #f7f9fb;
+  --line: #e5e9ef;
+  --line-strong: #c9d1dc;
+  --ink: #131a23;
+  --ink-2: #3a4653;
+  --ink-dim: #6a7688;
 
-  --ok: #15803d;      --ok-bg: #dcfce7;
-  --info: #0369a1;    --info-bg: #e0f2fe;
-  --mid: #b45309;     --mid-bg: #fef3c7;
-  --bad: #b91c1c;     --bad-bg: #fee2e2;
-  --neutral: #52627a; --neutral-bg: #eef1f5;
+  /* A settled navy rather than a bright web blue — it carries authority and
+     stays quiet next to the verdict colours. */
+  --accent: #1a4b8f;
+  --accent-soft: #eef3fa;
+
+  /* Verdict palette. Muted a step below their pure forms: legible against
+     white, calm in bulk, still unmistakable from across a desk. */
+  --ok: #197245;      --ok-bg: #e6f4ec;
+  --info: #1c6299;    --info-bg: #e8f1f8;
+  --mid: #9a5810;     --mid-bg: #fbf1de;
+  --bad: #a92b2b;     --bad-bg: #fbeaea;
+  --neutral: #5a6779; --neutral-bg: #eef1f5;
 
   --radius: 10px;
   --radius-lg: 14px;
-  --shadow: 0 1px 2px rgba(16, 23, 34, .05), 0 1px 3px rgba(16, 23, 34, .04);
-  --shadow-lg: 0 4px 16px rgba(16, 23, 34, .07);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0d1017;
-    --surface: #141922;
-    --surface-2: #1a212c;
-    --line: #26303e;
-    --line-strong: #37445a;
-    --ink: #e9eef6;
-    --ink-2: #c3cddc;
-    --ink-dim: #8d9bb0;
-    --accent: #7aa5ff;
-    --accent-soft: #1a2540;
-
-    --ok: #6ee7a0;      --ok-bg: #10321f;
-    --info: #7dd3fc;    --info-bg: #0c2b3f;
-    --mid: #fbbf24;     --mid-bg: #392a08;
-    --bad: #fca5a5;     --bad-bg: #3d1417;
-    --neutral: #9fb0c6; --neutral-bg: #1e2735;
-
-    --shadow: 0 1px 2px rgba(0, 0, 0, .3);
-    --shadow-lg: 0 6px 22px rgba(0, 0, 0, .38);
-  }
+  --shadow: 0 1px 2px rgba(19, 26, 35, .04), 0 1px 3px rgba(19, 26, 35, .03);
+  --shadow-lg: 0 4px 16px rgba(19, 26, 35, .06);
 }
 
 * { box-sizing: border-box; }
