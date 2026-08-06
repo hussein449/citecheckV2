@@ -1,0 +1,9 @@
+flask>=3.0
+pymupdf>=1.24
+requests>=2.31
+rapidfuzz>=3.6
+beautifulsoup4>=4.12
+lxml>=5.0
+playwright>=1.44
+# optional: enables LLM-grade relevance judging instead of the lexical fallback
+anthropic>=0.40

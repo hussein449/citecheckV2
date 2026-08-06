@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CiteCheck — citation screening for academic papers</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231d4ed8'/%3E%3Cpath d='M6 6.5A1.8 1.8 0 0 1 7.8 4.7H17v14.6H7.8A1.8 1.8 0 0 0 6 21z' fill='none' stroke='white' stroke-width='1.7' stroke-linejoin='round'/%3E%3Cpath d='m9.3 11.6 1.9 1.9 3.6-4' fill='none' stroke='white' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H19v18H6.5A2.5 2.5 0 0 0 4 22z"/>
+          <path d="m9 11 2.2 2.2L16 8.5"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <strong>CiteCheck</strong>
+        <span>Citation screening</span>
+      </span>
+    </a>
+
+    <div class="caps">
+      <span class="cap {{ 'on' if capabilities.claude else 'off' }}">
+        <i></i>{{ capabilities.engine_label }}
+      </span>
+      <span class="cap {{ 'on' if capabilities.screenshots else 'off' }}">
+        <i></i>{{ 'Evidence capture' if capabilities.screenshots else 'No screenshots' }}
+      </span>
+      {% if not capabilities.contact_email %}
+      <span class="cap off" title="Set CITECHECK_CONTACT_EMAIL to enable Unpaywall, which finds free full-text copies behind paywalls.">
+        <i></i>Unpaywall off
+      </span>
+      {% endif %}
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ── Upload ─────────────────────────────────────────────── -->
+  <section id="panel-upload">
+    <div class="hero">
+      <h1>Screen a paper's references before you trust them</h1>
+      <p>
+        CiteCheck reads every reference in a manuscript, confirms the cited work
+        actually exists, checks whether it has been retracted, and tests whether
+        it says what it was cited for — with a screenshot of the evidence for
+        each finding.
+      </p>
+    </div>
+
+    <div class="panel panel-drop">
+      <div id="drop" class="drop">
+        <input type="file" id="file" accept="application/pdf,.pdf" hidden>
+        <div class="drop-inner">
+          <div class="drop-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/>
+              <path d="M3 15v3a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3v-3"/>
+            </svg>
+          </div>
+          <h2>Drop a manuscript here</h2>
+          <p>or <button type="button" class="linkish" id="browse">browse your files</button></p>
+          <p class="hint">PDF, up to {{ capabilities.max_upload_mb }} MB · nothing is uploaded anywhere but this machine</p>
+        </div>
+      </div>
+
+      <details class="settings">
+        <summary>Advanced settings</summary>
+        <div class="settings-grid">
+          <label>
+            <span>References to check</span>
+            <input type="number" id="maxRefs" value="250" min="1" max="500">
+            <small>Each is resolved, fetched and screenshotted — roughly 5s each.</small>
+          </label>
+          <label>
+            <span>Parallel workers</span>
+            <input type="number" id="workers" value="4" min="1" max="8">
+            <small>Higher is faster but hits publisher sites harder. 6–8 suits a large bibliography.</small>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="useClaude" {{ 'checked' if capabilities.claude else 'disabled' }}>
+            <span>Judge relevance with an AI model</span>
+            <small>{{ 'Each citing sentence is judged separately. Falls back to lexical scoring on failure.' if capabilities.claude else 'Set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable.' }}</small>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="useShots" {{ 'checked' if capabilities.screenshots else 'disabled' }}>
+            <span>Capture evidence screenshots</span>
+            <small>{{ 'The citing sentence, the source, and the matching passage.' if capabilities.screenshots else 'Run: python -m playwright install chromium' }}</small>
+          </label>
+        </div>
+      </details>
+
+      <p id="uploadError" class="error" hidden></p>
+    </div>
+
+    <!-- ── What it checks ──────────────────────────────────── -->
+    <section class="explain">
+      <div class="explain-head">
+        <h2>What CiteCheck looks for</h2>
+        <p>Five independent checks on every reference — plus the evidence to settle each one yourself.</p>
+      </div>
+
+      <div class="checks">
+        <article class="check-card">
+          <span class="ico critical" aria-hidden="true">?</span>
+          <h3>Does the cited work exist?</h3>
+          <p>
+            Every reference is looked up in Crossref, OpenAlex, Semantic Scholar,
+            arXiv and Europe PMC. A reference no index has heard of — or a DOI
+            that is well-formed but registered nowhere — is flagged as
+            <b>not found</b>. This is the signature of an invented citation.
+          </p>
+        </article>
+
+        <article class="check-card">
+          <span class="ico critical" aria-hidden="true">⊘</span>
+          <h3>Has it been retracted?</h3>
+          <p>
+            Retraction and correction notices are read from Crossref, OpenAlex and
+            Europe PMC. A retracted source cannot support the claim made about it,
+            and citing one is a finding in its own right.
+          </p>
+        </article>
+
+        <article class="check-card">
+          <span class="ico" aria-hidden="true">≡</span>
+          <h3>Does the source say what it's cited for?</h3>
+          <p>
+            The source is retrieved — open-access full text where one exists,
+            the indexed abstract otherwise — and <b>each citing sentence is judged
+            separately</b>. A reference can genuinely support one claim while being
+            oversold for another, and that gap is exactly what gets missed by eye.
+          </p>
+        </article>
+
+        <article class="check-card">
+          <span class="ico" aria-hidden="true">⚑</span>
+          <h3>Has the numbering slipped?</h3>
+          <p>
+            When the text credits “Pinto et al. [29]” but entry 29 is by someone
+            else entirely, the reference numbering has drifted — and every citation
+            after it may be wrong too.
+          </p>
+        </article>
+
+        <article class="check-card">
+          <span class="ico" aria-hidden="true">⧉</span>
+          <h3>Is anything listed twice?</h3>
+          <p>
+            The same work entered under two different numbers, and citation markers
+            that point at no bibliography entry at all.
+          </p>
+        </article>
+
+        <article class="check-card">
+          <span class="ico" aria-hidden="true">◈</span>
+          <h3>Can you see the proof?</h3>
+          <p>
+            Every finding comes with three screenshots: the citing sentence
+            highlighted in the manuscript, the top of the cited source, and the
+            matching passage highlighted in place. Checking a verdict takes
+            seconds, not a trip to the library.
+          </p>
+        </article>
+      </div>
+
+      <p class="caveat">
+        <b>Worth knowing.</b> Most publisher pages are paywalled, so many
+        references are judged on their indexed abstract — the report says so, per
+        reference, wherever that applies. A verdict is a prompt to look, not a
+        ruling: the screenshots exist so you can settle it yourself in seconds.
+      </p>
+    </section>
+  </section>
+
+  <!-- ── Progress ───────────────────────────────────────────── -->
+  <section id="panel-progress" class="panel" hidden>
+    <h2 id="progressTitle">Working…</h2>
+    <div class="bar"><div class="bar-fill" id="barFill"></div></div>
+    <p class="status" id="statusLine">Starting up…</p>
+    <ol class="log" id="log"></ol>
+  </section>
+
+  <!-- ── Results ────────────────────────────────────────────── -->
+  <section id="panel-results" hidden>
+    <div class="panel">
+      <div class="results-head">
+        <div class="results-title">
+          <p class="kicker">Screening report</p>
+          <h2 id="resultTitle">Results</h2>
+          <p class="status" id="resultMeta"></p>
+        </div>
+        <div class="results-actions">
+          <button class="btn" id="startOver">Screen another paper</button>
+        </div>
+      </div>
+
+      <div id="riskBanner" class="risk" hidden></div>
+      <div id="tally" class="tally"></div>
+      <div id="warnings" class="warnings" hidden></div>
+    </div>
+
+    <div class="panel">
+      <div class="filters" id="filters"></div>
+      <div id="cards" class="cards"></div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p>CiteCheck runs locally. Uploads, screenshots and reports stay in this machine's <code>runs/</code> directory.</p>
+  </div>
+</footer>
+
+<div id="lightbox" class="lightbox" hidden>
+  <button class="lightbox-close" id="lightboxClose" aria-label="Close">✕</button>
+  <img id="lightboxImg" alt="">
+  <p id="lightboxCaption"></p>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

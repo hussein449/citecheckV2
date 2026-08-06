@@ -1,0 +1,14 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Run artefacts
+runs/
+uploads/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
