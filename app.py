@@ -5,7 +5,9 @@ Run with:  python app.py     then open http://127.0.0.1:5000
 
 from __future__ import annotations
 
+import hmac
 import json
+import os
 import re
 import socket
 import threading
@@ -68,6 +70,42 @@ def _capabilities() -> dict:
         "max_upload_mb": MAX_UPLOAD_MB,
         "contact_email": bool(resolve.contact_email()),
     }
+
+
+# One shared password, for when the app is reachable from outside localhost.
+# Nothing here is per-user: it exists so a link can be handed to someone without
+# an account, not to identify who is on the other end.
+#
+# Unset, the app stays open — which is what you want on 127.0.0.1 and nowhere
+# else. Uploading a paper costs real money against the configured model key, so
+# an unset password on a public host means strangers spending it.
+_PASSWORD = os.environ.get("CITECHECK_PASSWORD", "")
+_USERNAME = os.environ.get("CITECHECK_USERNAME", "client")
+
+
+@app.before_request
+def _require_password():
+    if not _PASSWORD:
+        return None
+
+    auth = request.authorization
+    # compare_digest keeps the comparison constant-time; a plain == leaks the
+    # password one character at a time to anyone willing to measure.
+    if (
+        auth is not None
+        and auth.type == "basic"
+        and hmac.compare_digest(auth.username or "", _USERNAME)
+        and hmac.compare_digest(auth.password or "", _PASSWORD)
+    ):
+        return None
+
+    # The realm is the text the browser prints above its own login prompt, so
+    # the visitor can tell what they are being asked to sign in to.
+    return Response(
+        "This demo is password-protected.\n",
+        401,
+        {"WWW-Authenticate": 'Basic realm="CiteCheck demo"'},
+    )
 
 
 @app.get("/")
