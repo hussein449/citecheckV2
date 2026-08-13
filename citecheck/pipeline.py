@@ -13,6 +13,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -139,6 +140,10 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
 
     duplicates = crosscheck.find_duplicates(matched)
 
+    # key -> (stage, detail) for whatever each reference is doing right now.
+    # Single assignments under the GIL, so no lock is needed.
+    stages: dict[str, tuple[str, str]] = {}
+
     def work(key: str) -> tuple[str, dict]:
         return key, _check_one(
             key=key,
@@ -148,20 +153,25 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
             options=options,
             duplicate_of=duplicates.get(key, ""),
             paper_path=pdf_path,
+            on_stage=lambda stage, detail: stages.__setitem__(key, (stage, detail)),
         )
 
     workers = max(1, options.workers)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    budget = _check_budget(len(capped), workers)
+
+    # Not a context manager: its __exit__ joins every worker, and the whole
+    # point here is to survive a worker that will never finish.
+    pool = ThreadPoolExecutor(max_workers=workers)
+    pending = {pool.submit(work, key): key for key in capped}
+    try:
         # Report each reference as it finishes, not in reference order. `map`
         # yields strictly in submission order, so one slow reference holds back
         # every result queued behind it — the workers keep going, but the
         # progress log sits on the same line for minutes and reads as a hang.
-        # A reference that resolves to nothing is the usual culprit: it has to
-        # strike out at every index before it can say so.
         #
         # The report itself is unaffected: `report.references` is rebuilt in
         # reference order below, from `results`.
-        for future in as_completed([pool.submit(work, key) for key in capped]):
+        for future in as_completed(pending, timeout=budget):
             key, entry = future.result()
             results[key] = entry
             done += 1
@@ -176,9 +186,33 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
         # Each worker holds its own browser and only that thread may close it.
         # A barrier occupies every worker at once, so each runs exactly one
         # cleanup task — otherwise a fast thread could take them all and the
-        # rest would leak a Chrome process per run.
+        # rest would leak a Chrome process per run. Skipped when the budget
+        # blew, because a wedged worker can never reach the barrier.
         if options.take_screenshots:
             _shutdown_browsers(pool, workers)
+    except FutureTimeout:
+        for future, key in pending.items():
+            if future.done() or key in results:
+                continue
+            entry = _timed_out_entry(
+                key, matched[key], grouped[key], duplicates.get(key, ""), budget,
+                stages.get(key, ("", "")),
+            )
+            results[key] = entry
+            done += 1
+            report.warnings.append(f"[{key}] {entry['notes'][0]}")
+            progress({
+                "stage": "check",
+                "message": f"[{entry['reference'].get('number') or key}] timed out — "
+                           f"{_short(entry['reference'].get('title') or entry['reference'].get('raw', ''))}",
+                "percent": 20 + int(74 * done / total),
+                "entry": entry,
+            })
+    finally:
+        # A thread blocked in a socket or a browser call cannot be interrupted
+        # from here, so never wait on one: cancel what has not started and let
+        # the process reap the rest.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     report.references = [results[k] for k in capped if k in results]
 
@@ -344,6 +378,68 @@ def _format_eta(seconds: float) -> str:
     return f"{minutes / 60:.1f} hours"
 
 
+def _check_budget(count: int, workers: int) -> float:
+    """Wall-clock ceiling for the whole checking phase.
+
+    A publisher that accepts a connection and then sends nothing can wedge a
+    worker indefinitely: `requests` and `page.goto` take timeouts, but
+    `page.evaluate` takes none, and a thread blocked in either cannot be
+    interrupted from outside. Without a ceiling one such reference means the
+    run never finishes and the reader never sees the twenty that did.
+
+    Three times the up-front estimate, floor of three minutes. Loose enough
+    that a slow bibliography finishes normally, tight enough that a wedged
+    reference costs minutes rather than the whole report.
+    """
+    return max(180.0, 3 * count * _SERIAL_SECONDS_PER_REF / max(1, workers))
+
+
+def _timed_out_entry(
+    key: str,
+    reference: refs.Reference,
+    citations: list[intext.Citation],
+    duplicate_of: str,
+    budget: float,
+    stage: tuple[str, str],
+) -> dict:
+    """Stand-in for a reference whose check never came back.
+
+    Deliberately "unverified" rather than a new verdict: nothing was learned
+    about this reference either way, which is exactly what unverified means.
+    Saying "not found" would accuse the author of citing something that does
+    not exist, on the evidence of a publisher being slow.
+    """
+    doing, detail = stage
+    what = f"It was still {doing}" if doing else "It had not finished"
+    where = f" at {detail}" if detail else ""
+    note = (
+        f"Not checked: this reference was still running when the whole run hit "
+        f"its time limit of {_format_eta(budget)}. {what}{where}. That host "
+        "accepted the connection and then stopped responding, which stalls the "
+        "check indefinitely — it says nothing about whether the citation is "
+        "sound. Opening the link yourself will usually work, and re-running "
+        "often clears it."
+    )
+    return {
+        "key": key,
+        "reference": reference.to_dict(),
+        "citations": [c.to_dict() for c in citations],
+        "citation_count": len(citations),
+        "verdict": "unverified",
+        "score": 0.0,
+        "reason": note,
+        "engine": "",
+        "source": {},
+        "fetched": {},
+        "shots": {},
+        "notes": [note],
+        "flags": [
+            f.to_dict()
+            for f in crosscheck.check(key, reference, citations, duplicate_of)
+        ],
+    }
+
+
 def _shutdown_browsers(pool: ThreadPoolExecutor, workers: int) -> None:
     """Close every worker's browser from the thread that owns it."""
     gate = threading.Barrier(workers, timeout=30)
@@ -371,8 +467,15 @@ def _check_one(
     options: Options,
     duplicate_of: str = "",
     paper_path: str = "",
+    on_stage: Callable[[str, str], None] = lambda stage, detail: None,
 ) -> dict:
-    """Resolve, fetch, judge and screenshot a single reference."""
+    """Resolve, fetch, judge and screenshot a single reference.
+
+    `on_stage(stage, detail)` reports what this reference is currently doing.
+    A worker that wedges can never report its own failure, so the run records
+    each step as it starts — that record is the only evidence left of where a
+    stalled reference actually got to.
+    """
     entry: dict = {
         "key": key,
         "reference": reference.to_dict(),
@@ -424,6 +527,7 @@ def _check_one(
             target = source.oa_url or source.url or ""
         if not target:
             return
+        on_stage("screenshotting the publisher page", target)
         try:
             captured = shots.capture(
                 url=target,
@@ -462,6 +566,7 @@ def _check_one(
             except Exception as exc:
                 entry["notes"].append(f"Abstract card failed: {type(exc).__name__}")
 
+    on_stage("looking the reference up in the citation indexes", "")
     try:
         source = resolve.resolve(reference)
     except Exception as exc:
@@ -492,6 +597,7 @@ def _check_one(
         )
         return entry
 
+    on_stage("downloading the cited source", source.oa_url or source.url or "")
     try:
         content = fetch.fetch_source(source)
     except Exception as exc:
@@ -513,6 +619,7 @@ def _check_one(
         snap(content=content, source=source)
         return entry
 
+    on_stage("judging the claims against the retrieved text", "")
     verdict = match.judge(
         claims=claim_sentences,
         source_text=body,
