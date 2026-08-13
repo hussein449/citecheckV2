@@ -12,7 +12,7 @@ import re
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -152,7 +152,17 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
 
     workers = max(1, options.workers)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for key, entry in pool.map(work, capped):
+        # Report each reference as it finishes, not in reference order. `map`
+        # yields strictly in submission order, so one slow reference holds back
+        # every result queued behind it — the workers keep going, but the
+        # progress log sits on the same line for minutes and reads as a hang.
+        # A reference that resolves to nothing is the usual culprit: it has to
+        # strike out at every index before it can say so.
+        #
+        # The report itself is unaffected: `report.references` is rebuilt in
+        # reference order below, from `results`.
+        for future in as_completed([pool.submit(work, key) for key in capped]):
+            key, entry = future.result()
             results[key] = entry
             done += 1
             progress({
