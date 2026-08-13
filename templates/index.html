@@ -26,7 +26,8 @@
     </a>
 
     <div class="caps">
-      <span class="cap {{ 'on' if capabilities.claude else 'off' }}">
+      <span class="cap {{ 'on' if capabilities.model else 'off' }}"
+            title="Whether a model key is configured. What actually judged a run is shown on its report.">
         <i></i>{{ capabilities.engine_label }}
       </span>
       <span class="cap {{ 'on' if capabilities.screenshots else 'off' }}">
@@ -86,9 +87,9 @@
             <small>Higher is faster but hits publisher sites harder. 6–8 suits a large bibliography.</small>
           </label>
           <label class="check">
-            <input type="checkbox" id="useClaude" {{ 'checked' if capabilities.claude else 'disabled' }}>
+            <input type="checkbox" id="useModel" {{ 'checked' if capabilities.model else 'disabled' }}>
             <span>Judge relevance with an AI model</span>
-            <small>{{ 'Each citing sentence is judged separately. Falls back to lexical scoring on failure.' if capabilities.claude else 'Set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable.' }}</small>
+            <small>{{ 'Each citing sentence is judged separately. Falls back to lexical scoring on failure.' if capabilities.model else 'Set OPENAI_API_KEY to enable.' }}</small>
           </label>
           <label class="check">
             <input type="checkbox" id="useShots" {{ 'checked' if capabilities.screenshots else 'disabled' }}>
@@ -197,6 +198,7 @@
           <p class="kicker">Screening report</p>
           <h2 id="resultTitle">Results</h2>
           <p class="status" id="resultMeta"></p>
+          <p class="status" id="engineNote" hidden></p>
         </div>
         <div class="results-actions">
           <button class="btn" id="startOver">Screen another paper</button>

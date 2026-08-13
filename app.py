@@ -53,7 +53,6 @@ _SHOTS_OK, _SHOTS_DETAIL = shots.browser_status()
 
 
 _ENGINE_LABEL = {
-    "claude": "Claude judging",
     "openai": "OpenAI judging",
     "lexical": "Lexical judging",
 }
@@ -62,7 +61,9 @@ _ENGINE_LABEL = {
 def _capabilities() -> dict:
     engine = match.active_engine()
     return {
-        "claude": engine != "lexical",
+        # "configured", not "working" — whether the key is accepted is only
+        # knowable once a call is made, so the report says what actually judged.
+        "model": engine != "lexical",
         "engine": engine,
         "engine_label": _ENGINE_LABEL.get(engine, engine),
         "screenshots": _SHOTS_OK,
@@ -136,7 +137,7 @@ def upload():
 
     options = pipeline.Options(
         max_references=_int_arg("max_references", 250, 1, 500),
-        use_claude=request.form.get("use_claude", "1") != "0",
+        use_model=request.form.get("use_model", "1") != "0",
         take_screenshots=request.form.get("screenshots", "1") != "0",
         workers=_int_arg("workers", 4, 1, 8),
     )
@@ -283,7 +284,7 @@ if __name__ == "__main__":
         )
 
     print("CiteCheck running at http://127.0.0.1:5000")
-    print(f"  relevance engine : {'Claude' if match.claude_available() else 'lexical (set ANTHROPIC_API_KEY for Claude)'}")
+    print(f"  relevance engine : {'OpenAI' if match.openai_available() else 'lexical (set OPENAI_API_KEY for model judging)'}")
     print(f"  screenshots      : {f'enabled via {_SHOTS_DETAIL}' if _SHOTS_OK else f'unavailable ({_SHOTS_DETAIL})'}")
     print(
         "  open access      : "

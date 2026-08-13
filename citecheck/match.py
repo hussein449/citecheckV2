@@ -4,11 +4,11 @@ Two tiers:
   * a lexical tier that always runs — IDF-weighted overlap plus fuzzy phrase
     matching. It also locates the best-matching passage in the source, which is
     what the screenshot step highlights.
-  * an optional Claude tier (when ANTHROPIC_API_KEY is set) that reads the claim
+  * an optional model tier (when OPENAI_API_KEY is set) that reads the claim
     and the source text and returns a reasoned verdict.
 
-The lexical tier is never skipped: even under Claude, its passage location is
-what anchors the evidence screenshot.
+The lexical tier is never skipped: even under the model tier, its passage
+location is what anchors the evidence screenshot.
 """
 
 from __future__ import annotations
@@ -313,7 +313,7 @@ def _verdict_from_score(score: float) -> str:
     a citing sentence like "in the early stages they had military purposes [1]"
     shares almost no vocabulary with the abstract of the paper that supports it.
     Calling that "unrelated" would accuse an author of miscitation on the basis
-    of nothing. Only the Claude tier, which actually reads both texts, may make
+    of nothing. Only the model tier, which actually reads both texts, may make
     that claim; here the honest floor is "can't tell".
     """
     if score >= 0.52:
@@ -331,13 +331,13 @@ def _lexical_reason(result: MatchResult) -> str:
         return (
             f"Word overlap with the retrieved text was low ({result.score:.2f}), "
             "which is not enough to judge either way — this needs a human read, "
-            "or Claude judging enabled."
+            "or model judging enabled."
         )
     return f"Lexical overlap {result.score:.2f}; strongest shared terms: {terms}."
 
 
 # --------------------------------------------------------------------------- #
-# Claude tier
+# Model tier
 # --------------------------------------------------------------------------- #
 
 _JUDGE_SCHEMA = {
@@ -389,16 +389,6 @@ _JUDGE_SYSTEM = (
 )
 
 
-def claude_available() -> bool:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return False
-    try:
-        import anthropic  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 def openai_available() -> bool:
     if not os.environ.get("OPENAI_API_KEY"):
         return False
@@ -410,82 +400,22 @@ def openai_available() -> bool:
 
 
 def active_engine() -> str:
-    """Which judging tier will actually run.
+    """Which judging tier is *available* to run — not which one produced a verdict.
 
-    CITECHECK_LLM ("claude" / "openai" / "off") pins the choice when both keys
-    are present; otherwise whichever key is set wins, Claude first.
+    A key that is present but rejected still reports "openai" here, because this
+    answers "is the tier configured", which is all that is knowable before a call
+    is made. What actually judged a run is a separate question, answered after
+    the fact by `pipeline.run` from the per-reference engines.
+
+    CITECHECK_LLM=off forces the lexical tier and skips the model entirely.
     """
-    pinned = (os.environ.get("CITECHECK_LLM") or "").strip().lower()
-    if pinned == "off":
+    if (os.environ.get("CITECHECK_LLM") or "").strip().lower() == "off":
         return "lexical"
-    if pinned == "claude":
-        return "claude" if claude_available() else "lexical"
-    if pinned == "openai":
-        return "openai" if openai_available() else "lexical"
-    if claude_available():
-        return "claude"
-    if openai_available():
-        return "openai"
-    return "lexical"
+    return "openai" if openai_available() else "lexical"
 
 
 def llm_available() -> bool:
     return active_engine() != "lexical"
-
-
-def claude_match(
-    claim: str,
-    source_text: str,
-    title: str = "",
-    reference_line: str = "",
-    model: str | None = None,
-) -> MatchResult | None:
-    """Ask Claude to judge the citation. Returns None if the call is unusable."""
-    if not claude_available():
-        return None
-
-    import anthropic
-
-    excerpt = (source_text or "")[:24000]
-    if len(excerpt.strip()) < 120:
-        return None
-
-    model = model or os.environ.get("CITECHECK_CLAUDE_MODEL") or "claude-opus-5"
-    prompt = _judge_prompt(claim, reference_line, title, excerpt)
-
-    try:
-        client = anthropic.Anthropic()
-        response = client.messages.create(
-            model=model,
-            max_tokens=8000,
-            system=_JUDGE_SYSTEM,
-            output_config={
-                "effort": "medium",
-                "format": {"type": "json_schema", "schema": _JUDGE_SCHEMA},
-            },
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except Exception as exc:  # network, auth, rate limit — fall back to lexical
-        return MatchResult(
-            engine="claude-error",
-            verdict="unverified",
-            reason=f"Claude judging unavailable ({type(exc).__name__}); used lexical scoring.",
-        )
-
-    if response.stop_reason == "refusal":
-        return MatchResult(
-            engine="claude-refusal",
-            verdict="unverified",
-            reason="Claude declined to judge this reference.",
-        )
-
-    text = next((b.text for b in response.content if b.type == "text"), "")
-    try:
-        data = json.loads(text)
-    except (ValueError, TypeError):
-        return None
-
-    return _result_from_payload(data, engine="claude")
 
 
 def openai_match(
@@ -495,7 +425,7 @@ def openai_match(
     reference_line: str = "",
     model: str | None = None,
 ) -> MatchResult | None:
-    """Same judgement as `claude_match`, via an OpenAI-compatible endpoint.
+    """Ask the model to judge the citation. Returns None if the call is unusable.
 
     Honours OPENAI_BASE_URL, so this also covers Azure-style gateways and local
     OpenAI-compatible servers.
@@ -574,7 +504,7 @@ def judge(
     title: str = "",
     abstract: str = "",
     reference_line: str = "",
-    use_claude: bool = True,
+    use_model: bool = True,
     max_claims: int = 6,
 ) -> MatchResult:
     """Judge every citing sentence separately, then roll up to one verdict.
@@ -597,7 +527,7 @@ def judge(
     """
     lexical = lexical_match(claims, source_text, title=title, abstract=abstract)
 
-    engine = active_engine() if use_claude else "lexical"
+    engine = active_engine() if use_model else "lexical"
     if engine == "lexical":
         return lexical
 
@@ -606,12 +536,11 @@ def judge(
         return lexical
 
     capped = claim_list[:max_claims]
-    runner = claude_match if engine == "claude" else openai_match
 
     judged: list[tuple[str, MatchResult]] = []
     failure: MatchResult | None = None
     for claim in capped:
-        result = runner(claim, source_text, title=title, reference_line=reference_line)
+        result = openai_match(claim, source_text, title=title, reference_line=reference_line)
         if result is None:
             continue
         if "-" in result.engine:          # "<engine>-error" / "-refusal"

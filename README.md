@@ -144,26 +144,28 @@ cited a dozen times.
 
 ## Judging engine
 
-Set **either** key — in a `.env` file next to `app.py` (copy `.env.example`), or
-as a normal environment variable.
+Set the key — in a `.env` file next to `app.py` (copy `.env.example`), or as a
+normal environment variable.
 
 ```ini
 OPENAI_API_KEY=sk-...
-# or
-ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 | Variable | Default | Notes |
 |---|---|---|
-| `CITECHECK_LLM` | auto | `claude`, `openai`, or `off`. Claude wins if both keys are set. |
+| `CITECHECK_LLM` | auto | `off` skips the model entirely and scores lexically. |
 | `CITECHECK_OPENAI_MODEL` | `gpt-4o` | Any model supporting structured outputs. |
-| `CITECHECK_CLAUDE_MODEL` | `claude-opus-5` | |
 | `OPENAI_BASE_URL` | — | For Azure or any OpenAI-compatible gateway. |
 | `CITECHECK_CONTACT_EMAIL` | — | Your email. Not a secret — see below. |
 
 With no key, it falls back to lexical scoring. That still finds and screenshots
 everything, but its verdicts are much weaker — this is the single biggest lever
 on output quality.
+
+A key that is *set but rejected* falls back the same way, per reference. The
+report distinguishes the two cases: its header names the engine that actually
+returned verdicts and how many references it judged, so a run where every call
+failed reads "judged by lexical overlap", never "judged by OpenAI".
 
 `.env` is gitignored. Never commit a key.
 
@@ -250,7 +252,7 @@ citecheck/
   refs.py              bibliography -> structured entries
   resolve.py           entry -> URL, metadata, existence + retraction evidence
   fetch.py             retrieve source text (PDF/HTML/JATS), guarantee the abstract
-  match.py             lexical scoring + per-claim Claude/OpenAI judging
+  match.py             lexical scoring + per-claim model judging
   crosscheck.py        author-mismatch, duplicate, retraction and existence flags
   shots.py             header + highlighted-evidence screenshots
   pipeline.py          orchestration + screening risk summary

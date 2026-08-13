@@ -28,7 +28,7 @@ _SERIAL_SECONDS_PER_REF = 20.0
 @dataclass
 class Options:
     max_references: int = 40
-    use_claude: bool = True
+    use_model: bool = True
     take_screenshots: bool = True
     workers: int = 4
     # Each citing sentence is judged on its own, so this bounds the model spend
@@ -110,8 +110,13 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
         "references_parsed": len(reference_list),
         "references_cited": len(ordered_keys),
         "references_checked": len(capped),
-        "engine": match.active_engine() if options.use_claude else "lexical",
+        # What the model tier *can* do, decided before any call is made. The
+        # `engine` key below is overwritten once the run is done with what
+        # actually produced the verdicts — the two differ whenever the key is
+        # configured but rejected, and that difference is the whole point.
+        "engine_planned": match.active_engine() if options.use_model else "lexical",
     }
+    report.stats["engine"] = report.stats["engine_planned"]
     # Measured ~5s of wall clock per reference at 4 workers, i.e. roughly 20s of
     # serial work each (resolve, fetch, judge, three screenshots) once network
     # waits are overlapped. Divide that serial cost by the worker count — using
@@ -195,6 +200,7 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
     report.stats["corrected"] = corrected
     report.stats["not_found"] = not_found
     report.stats["claims_judged"] = claims_judged
+    report.stats.update(_engine_outcome(report))
     report.stats["risk"] = risk_summary(report.stats)
     report.stats["elapsed_seconds"] = round(time.time() - started, 1)
 
@@ -203,6 +209,55 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
     )
     progress({"stage": "done", "message": "Finished.", "percent": 100, "report": report.to_dict()})
     return report
+
+
+# How each engine is named in prose written for the reader.
+_ENGINE_DISPLAY = {"openai": "OpenAI", "lexical": "lexical word overlap"}
+
+
+def _engine_outcome(report: Report) -> dict:
+    """Report the engine that actually produced the verdicts, not the one configured.
+
+    Selecting an engine up front and printing that as the run's headline is how a
+    report ends up saying "judged by <model>" when the API key was rejected and
+    every verdict below it is word overlap. The reader has no way to tell those
+    two runs apart, and the failure hides in the per-reference small print.
+
+    So the headline is derived after the fact: a reference only counts as judged
+    by the model if a model verdict came back for it. References that were never
+    resolved never reached the judge at all, and are excluded from the tally
+    rather than counted as failures.
+    """
+    eligible = [entry for entry in report.references if entry.get("engine")]
+    judged = [entry for entry in eligible if entry["engine"] != "lexical"]
+    planned = report.stats.get("engine_planned", "lexical")
+    named = _ENGINE_DISPLAY.get(planned, planned)
+
+    stats = {
+        "engine": judged[0]["engine"] if judged else "lexical",
+        "references_judged_by_model": len(judged),
+        "references_judgeable": len(eligible),
+        "engine_note": "",
+    }
+
+    if planned == "lexical" or not eligible:
+        return stats
+
+    if not judged:
+        stats["engine_note"] = (
+            f"{named} judging was enabled but produced no verdicts — every result "
+            "below is lexical word overlap, which can show that two texts discuss "
+            "the same thing but never that a citation is wrong. The per-reference "
+            "reasons say why each call failed."
+        )
+        report.warnings.append(stats["engine_note"])
+    elif len(judged) < len(eligible):
+        stats["engine_note"] = (
+            f"{named} judged {len(judged)} of {len(eligible)} references with "
+            "retrievable text; the rest fell back to lexical word overlap."
+        )
+
+    return stats
 
 
 # Findings that decide the screening headline, worst first. Each is
@@ -454,7 +509,7 @@ def _check_one(
         title=content.title or source.title,
         abstract=source.abstract,
         reference_line=reference.raw,
-        use_claude=options.use_claude,
+        use_model=options.use_model,
         max_claims=options.max_claims_per_reference,
     )
 

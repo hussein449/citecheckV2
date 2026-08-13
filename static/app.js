@@ -26,7 +26,6 @@ const VERDICT_LABEL = {
 };
 
 const ENGINE_LABEL = {
-  claude: "Claude",
   openai: "OpenAI",
   lexical: "lexical overlap",
 };
@@ -70,7 +69,7 @@ async function startRun(file) {
   body.append("pdf", file);
   body.append("max_references", $("maxRefs").value);
   body.append("workers", $("workers").value);
-  body.append("use_claude", $("useClaude").checked && !$("useClaude").disabled ? "1" : "0");
+  body.append("use_model", $("useModel").checked && !$("useModel").disabled ? "1" : "0");
   body.append("screenshots", $("useShots").checked && !$("useShots").disabled ? "1" : "0");
 
   show("progress");
@@ -153,15 +152,29 @@ function renderReport(report, runId) {
     `${s.pages ?? "?"} pages`,
     `${s.references_checked ?? 0} of ${s.references_cited ?? 0} cited references checked`,
     s.claims_judged ? `${s.claims_judged} individual claims judged` : null,
-    `judged by ${ENGINE_LABEL[s.engine] || s.engine || "lexical overlap"}`,
+    engineSummary(s),
     `${s.elapsed_seconds ?? "?"}s`,
   ].filter(Boolean).join(" · ");
+
+  const note = $("engineNote");
+  note.hidden = !s.engine_note;
+  note.textContent = s.engine_note || "";
 
   renderRisk(s.risk);
   renderTally(s);
   renderWarnings(report.warnings);
   renderFilters(s.verdicts || {}, report.references || []);
   renderCards();
+}
+
+// Names the engine that produced the verdicts, and how many references it
+// actually judged. A configured key that was rejected reads as "lexical
+// overlap" here, because that is what every verdict below it came from.
+function engineSummary(stats) {
+  const judged = stats.references_judged_by_model || 0;
+  if (!judged) return "judged by lexical overlap";
+  const label = ENGINE_LABEL[stats.engine] || stats.engine;
+  return `judged by ${label} (${judged} of ${stats.references_judgeable} references)`;
 }
 
 function renderRisk(risk) {
