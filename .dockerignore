@@ -1,0 +1,14 @@
+# Keep real keys and the ~800 MB of local run artefacts out of the image.
+.env
+.env.*
+!.env.example
+runs/
+uploads/
+
+.git/
+.claude/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/

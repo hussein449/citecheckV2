@@ -136,6 +136,13 @@ _CHANNELS = (None, "chrome", "msedge")
 
 _LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
 
+# A container grants Chromium neither the SYS_ADMIN its own sandbox needs nor a
+# /dev/shm large enough to render a full page, so it dies on launch and every
+# screenshot silently degrades. Both protections are worth keeping locally, so
+# dropping them is opt-in through the environment.
+if os.environ.get("CITECHECK_NO_SANDBOX") == "1":
+    _LAUNCH_ARGS += ["--no-sandbox", "--disable-dev-shm-usage"]
+
 
 def playwright_available() -> bool:
     try:

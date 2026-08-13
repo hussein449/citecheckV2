@@ -1,3 +1,14 @@
+---
+title: CiteCheck
+emoji: 🔍
+colorFrom: blue
+colorTo: gray
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Upload a paper, verify what its references actually say.
+---
+
 # CiteCheck
 
 Upload a paper. For every reference, CiteCheck confirms the cited work actually
