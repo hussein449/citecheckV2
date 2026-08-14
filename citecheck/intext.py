@@ -157,6 +157,7 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
     """
     citations: list[Citation] = []
     numeric_hits = 0
+    author_year_hits = 0
 
     for sent_offset, sentence in split_sentences(body_text):
         page = page_of_offset(sent_offset) if page_of_offset else 1
@@ -179,6 +180,7 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
 
         for match in _AUTHOR_YEAR.finditer(sentence):
             for key, label in _author_year_keys(match.group(1)):
+                author_year_hits += 1
                 citations.append(
                     Citation(
                         key=key,
@@ -193,6 +195,7 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
 
         for match in _NARRATIVE.finditer(sentence):
             key = normalise_key(match.group(1).split()[0], match.group(2))
+            author_year_hits += 1
             citations.append(
                 Citation(
                     key=key,
@@ -205,10 +208,16 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
                 )
             )
 
-    # A paper uses one scheme. If numeric markers dominate, author-year hits are
-    # almost always false positives (year ranges, parenthetical asides).
-    if numeric_hits >= 5:
-        citations = [c for c in citations if c.style == "numeric"]
+    # A paper uses one scheme, and each pattern misfires on the other's papers:
+    # "(2019)" year asides read as author-year in a numeric paper, and a summary
+    # table with a "Study ID" column of "[126]" cells reads as numeric in an
+    # author-year one. So the majority style wins rather than numeric winning
+    # outright — the latter threw away every real citation in an author-year
+    # review whose tables happened to number their rows, leaving nothing to
+    # check and a bibliography that matched none of the surviving markers.
+    if numeric_hits >= 5 or author_year_hits >= 5:
+        winner = "numeric" if numeric_hits >= author_year_hits else "author-year"
+        citations = [c for c in citations if c.style == winner]
 
     return _dedupe(citations)
 

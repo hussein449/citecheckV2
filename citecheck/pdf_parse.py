@@ -97,14 +97,60 @@ def _looks_like_running_header(line: str, seen: dict[str, int], total_pages: int
     return seen.get(key, 0) >= max(3, total_pages // 2)
 
 
+def _order_blocks(blocks: list, page: fitz.Page) -> list:
+    """Put a page's text blocks into reading order.
+
+    PyMuPDF's own `sort=True` orders blocks by position across the whole page,
+    which on a two-column paper interleaves the columns: a left-column block at
+    y=64 is followed by a right-column block at y=65, so consecutive sentences
+    come from opposite sides of the gutter. Prose survives that badly and a
+    reference list not at all — entries arrive shredded into alternating halves
+    and none of them parse.
+
+    So columns are detected from the gutter and read one at a time. Blocks that
+    span the gutter (running headers, wide tables) split the page into bands and
+    are emitted in place, which keeps a full-width element from jumping to the
+    top of the page.
+    """
+    mid = page.rect.x0 + page.rect.width / 2
+    slack = page.rect.width * 0.02
+
+    def side(block) -> int:
+        if block[2] <= mid + slack:
+            return 0                     # left of the gutter
+        if block[0] >= mid - slack:
+            return 1                     # right of it
+        return -1                        # spans it
+
+    by_position = sorted(blocks, key=lambda b: (round(b[1], 1), b[0]))
+    sides = [side(b) for b in blocks]
+    # One column, or a single stray block on the far side of a wide one: reading
+    # order is plain top-to-bottom and splitting on a gutter would invent one.
+    if sides.count(0) < 2 or sides.count(1) < 2:
+        return by_position
+
+    def band(pending: list) -> list:
+        return sorted(pending, key=lambda b: (side(b), round(b[1], 1), b[0]))
+
+    ordered: list = []
+    pending: list = []
+    for block in by_position:
+        if side(block) == -1:
+            ordered.extend(band(pending))
+            pending = []
+            ordered.append(block)
+        else:
+            pending.append(block)
+    ordered.extend(band(pending))
+    return ordered
+
+
 def _page_text(page: fitz.Page) -> str:
     """Extract text in reading order, tolerating multi-column layouts."""
-    blocks = page.get_text("blocks", sort=True)
+    # (x0, y0, x1, y1, text, block_no, block_type)
+    blocks = [b for b in page.get_text("blocks") if len(b) < 7 or b[6] == 0]
     parts: list[str] = []
-    for block in blocks:
-        # (x0, y0, x1, y1, text, block_no, block_type)
-        if len(block) >= 7 and block[6] != 0:
-            continue  # image block
+    for block in _order_blocks(blocks, page):
         chunk = (block[4] or "").strip()
         if chunk:
             parts.append(chunk)

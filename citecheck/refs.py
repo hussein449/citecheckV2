@@ -57,10 +57,28 @@ def parse_references(refs_text: str) -> list[Reference]:
     if not refs_text.strip():
         return []
 
-    chunks = _split_numbered(refs_text)
-    if len(chunks) < 2:
-        chunks = _split_author_year(refs_text)
+    numbered = _split_numbered(refs_text)
+    if len(numbered) >= 2:
+        return _build_all(numbered)
 
+    # Without entry numbers there is no unambiguous boundary marker, and each
+    # way of guessing one fails on layouts the other handles: splitting on
+    # entry-initial surnames misses authors whose given name is spelled out,
+    # while splitting on blank lines finds nothing in a bibliography set solid.
+    # A missed boundary silently welds two entries into one, so rather than
+    # committing to either rule, run both and keep whichever recovers more
+    # complete entries. Over-splitting does not win by default: a fragment with
+    # no author or no year builds no reference and so does not count.
+    return max(
+        (
+            _build_all(split(refs_text))
+            for split in (_split_author_year, _split_blocks, _split_year_anchored)
+        ),
+        key=len,
+    )
+
+
+def _build_all(chunks: list[tuple[int | None, str]]) -> list[Reference]:
     references: list[Reference] = []
     for number, raw in chunks:
         raw = _tidy(raw)
@@ -104,10 +122,14 @@ def _split_numbered(refs_text: str) -> list[tuple[int | None, str]]:
         return []
 
     # Entry numbers should mostly ascend; a stray "2020." at line start would
-    # break that and means we picked the wrong pattern.
+    # break that and means we picked the wrong pattern. The fraction is of
+    # adjacent *pairs*, of which there is one fewer than there are numbers —
+    # measuring it against the count instead put a perfectly ordered two-entry
+    # list below the bar, so short numbered bibliographies were handed to the
+    # author-year splitters, which have no numbers to find.
     numbers = [int(m.group(1) or m.group(2) or m.group(3)) for m in matches]
     ascending = sum(1 for a, b in zip(numbers, numbers[1:]) if b > a)
-    if ascending < len(numbers) * 0.6:
+    if ascending < (len(numbers) - 1) * 0.6:
         return []
 
     chunks: list[tuple[int | None, str]] = []
@@ -121,7 +143,18 @@ def _split_numbered(refs_text: str) -> list[tuple[int | None, str]]:
 def _split_author_year(refs_text: str) -> list[tuple[int | None, str]]:
     """Split an unnumbered bibliography on entry-initial surnames."""
     lines = [l for l in refs_text.splitlines()]
-    starter = re.compile(r"^\s*[A-Z][A-Za-z'’\-]+,\s*(?:[A-Z]\.\s*)+")
+    # Any author order can open an entry: "Agatz, N., …", "N Agatz, …", or
+    # "Bosona, Tesfaye. …" — Chicago and MLA spell the given name out in full.
+    # Recognising only the first form leaves this function returning a single
+    # chunk for a whole initials-first bibliography, which then falls through to
+    # blank-line splitting and depends on the PDF having blank lines to find.
+    # A wrapped continuation line cannot match any of these: a venue reads as
+    # "Aviation, 26(1)", whose comma is followed by a digit rather than a name.
+    starter = re.compile(
+        rf"^\s*(?:{_NAME}\s*,\s*(?:[{_U}]\.\s*)+"
+        rf"|{_INITIALS_HEAD}{_NAME}\s*[,(]"
+        rf"|{_NAME}\s*,\s+{_NAME}\s*[,.])"
+    )
     chunks: list[tuple[int | None, str]] = []
     current: list[str] = []
     for line in lines:
@@ -132,12 +165,30 @@ def _split_author_year(refs_text: str) -> list[tuple[int | None, str]]:
             current.append(line)
     if current:
         chunks.append((None, " ".join(current)))
-
-    if len(chunks) < 2:
-        # Last resort: blank-line separated blocks.
-        blocks = [b for b in re.split(r"\n\s*\n", refs_text) if b.strip()]
-        chunks = [(None, b) for b in blocks]
     return chunks
+
+
+def _split_blocks(refs_text: str) -> list[tuple[int | None, str]]:
+    """Split on blank lines, which many PDFs leave between entries."""
+    return [(None, b) for b in re.split(r"\n\s*\n", refs_text) if b.strip()]
+
+
+def _split_year_anchored(refs_text: str) -> list[tuple[int | None, str]]:
+    """Split where an author run followed by "(2019)" begins a new entry.
+
+    Line starts and blank lines are both layout accidents that PDF text
+    extraction routinely loses, which is how two entries end up welded into one
+    chunk — the second then has no key and vanishes from the bibliography
+    entirely. The authors-then-parenthesised-year pairing is not layout, it is
+    the citation style itself, so it survives reflow and finds those boundaries
+    wherever they landed.
+    """
+    flat = re.sub(r"\s*\n\s*", " ", refs_text)
+    starts = [0] + [m.start() for m in _ENTRY_HEAD.finditer(flat)]
+    return [
+        (None, flat[start:end])
+        for start, end in zip(starts, starts[1:] + [len(flat)])
+    ]
 
 
 def _build_reference(number: int | None, raw: str) -> Reference | None:
@@ -173,10 +224,12 @@ def _build_reference(number: int | None, raw: str) -> Reference | None:
     if number is not None:
         key = str(number)
     else:
-        surname = re.match(r"\s*([A-Z][A-Za-z'’\-]+)", raw)
-        if not (surname and year):
+        # Derived from the same phrase the alias index works from, so an entry's
+        # own key is always one of the keys a marker can reach it by.
+        words = _name_words(_entry_surname(authors or raw))
+        if not (words and year):
             return None
-        key = normalise_key(surname.group(1), year)
+        key = normalise_key("".join(words), year)
 
     return Reference(
         key=key,
@@ -205,7 +258,25 @@ _PARTICLE = (
     r"(?:(?:de|del|della|da|do|dos|das|di|du|van|von|der|den|ten|ter|la|le|"
     r"el|al|bin|ibn|abu|mac|mc|st)\s+)*"
 )
-_NAME = rf"{_PARTICLE}[{_U}][{_L}'’\-]+"           # a capitalised name word
+# Typesetting turns the hyphen in a double-barrelled surname into any of these,
+# and PDF extraction hands back whichever was printed: "Solano-Charris" arrives
+# as "Solano–Charris" often enough that an ASCII-only hyphen splits the name.
+_DASH = r"\-‐‑‒–—"
+_NAME = rf"{_PARTICLE}[{_U}][{_L}'’{_DASH}]+"      # a capitalised name word
+
+# One author's initials, however the publisher glues them together: "N", "N.",
+# "KW", "AAR", "J.M.", "H.-Y.". Kept greedy-free of the surname by requiring the
+# surname itself to start a fresh capitalised word.
+_INITIAL = rf"[{_U}]{{1,3}}\.?(?:\s*-\s*[{_L}]\.?)?"
+_INITIALS_HEAD = rf"(?:{_INITIAL}\s*){{1,4}}"
+
+# One author's full name, however many parts it runs to: "Agatz", "Rashid
+# Alyassi", "Seyed Mahdi Shavarani", "David C. Edwards", "Raïssa G. Mbiadou
+# Saleu". Stopping at two words leaves the surname outside the phrase whenever a
+# given name is spelled out in full, and the surname is the only part an
+# author-year marker ever prints. A comma or "&" ends the run, so it cannot run
+# on into the next author.
+_NAME_RUN = rf"{_NAME}(?:\s+(?:[{_U}]\.|{_NAME})){{0,3}}"
 
 # A run of "Surname, A. B.," entries — the author block of a numeric-style entry.
 # Matching this explicitly avoids mistaking the final initial's period ("…,
@@ -215,7 +286,8 @@ _AUTHOR_RUN = re.compile(
     rf"(?:and\s+|&\s+)?"                   # conjunction before the last author
     rf"{_NAME}"                            # surname
     rf"(?:\s+{_NAME})?"                    # optional second surname word
-    rf",\s*(?:[{_L}]\.\s*)+"               # , A. B. (initials may be lowercase)
+    # , A. B. (initials may be lowercase, and may be hyphenated: "H.-Y.")
+    rf",\s*(?:[{_L}]\.(?:\s*-\s*[{_L}]\.?)?\s*)+"
     rf"(?:[,;]\s*)?"                       # separator before the next author
     rf")+)"
 )
@@ -231,7 +303,34 @@ _INITIALS_RUN = re.compile(
     rf"\s*[,;]\s*"
     rf")+)"
 )
+# Vancouver, the house style of most medical and many Elsevier journals:
+# "Kastner M, Tricco AC, Soobiah C, et al. Title. Venue 2012;1:28."
+# The initials trail the surname and carry no periods at all, so neither run
+# above matches and the whole author list is mistaken for the title — which is
+# the field every "is this the work the author cited?" test measures against, so
+# the reference then resolves to nothing and is reported as not found.
+_VANCOUVER_AUTHOR = (
+    rf"{_NAME}(?:\s+{_NAME})?\s+[{_U}]{{1,4}}"
+    rf"(?:\s+(?:Jr|Sr|2nd|3rd|I{{1,3}}|IV))?"
+)
+_VANCOUVER_RUN = re.compile(
+    rf"^\s*((?:{_VANCOUVER_AUTHOR}\s*,\s*)*"    # every author but the last
+    rf"(?:{_VANCOUVER_AUTHOR}|et\s+al)"         # the last one, or "et al."
+    rf"(?:\s*,\s*(?:editors?|eds?))?\.)"        # edited books name their editors
+)
 _LEADING_ETAL = re.compile(r"^(?:et\s+al\.?\s*,?\s*)+", re.IGNORECASE)
+
+# A quoted title, in whichever quote characters the typesetter used. Long enough
+# to be a title rather than a scare-quoted word, and it may not span the whole
+# entry, which would mean the quotes were really wrapping the entire reference.
+_QUOTED_TITLE = re.compile(r"[\"“”«]\s*([^\"“”«»]{15,300}?)\s*[\"“”»]\s*[,.]?")
+
+# Harvard and Springer put the year between the authors and the title
+# ("Bosona, T., 2020. Urban freight…"), where it would otherwise be read as the
+# opening of the title and searched for as part of it.
+_LEADING_YEAR = re.compile(r"^\(?\s*(?:19|20)\d{2}[a-z]?\s*\)?\s*[.,:;]?\s*")
+# A part that carries no information but the year.
+_YEAR_ONLY = re.compile(r"^\(?\s*(?:19|20)\d{2}[a-z]?\s*\)?[.,;]?$")
 
 
 def _split_fields(raw: str) -> tuple[str, str, str]:
@@ -239,6 +338,19 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
     stripped = _URL.sub("", raw)
     stripped = re.sub(r"\bdoi:\s*\S+", "", stripped, flags=re.IGNORECASE)
     stripped = re.sub(r"\barXiv:\s*\S+", "", stripped, flags=re.IGNORECASE).strip()
+
+    # Style Q -- the title in quotes: IEEE, ACM, Chicago and MLA all print
+    # 'A. Smith, "Drone routing," Proc. ICRA, 2019.' Quotation marks say
+    # outright where the title begins and ends, which no amount of guessing at
+    # sentence boundaries can match — without this the comma inside the quotes
+    # reads as an author separator and the title comes back as a fragment of
+    # the venue. Checked first because it is evidence rather than heuristic.
+    quoted = _QUOTED_TITLE.search(stripped)
+    if quoted:
+        title = quoted.group(1).strip(" .,;")
+        authors = stripped[: quoted.start()].strip(" .,;&")
+        venue = stripped[quoted.end():].strip(" .,;")[:200]
+        return authors, title, venue
 
     # Style A -- "Authors (2019). Title. Venue, 12(3), 45-67."
     # The remainder must be substantial: Springer entries end with a trailing
@@ -252,12 +364,13 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
 
     # Style B -- "Surname, A., Surname, B. Title. Venue, 2019."
     # Style B' -- "A. Surname, B. Surname, Title. Venue (2019)."
-    for pattern in (_AUTHOR_RUN, _INITIALS_RUN):
+    for pattern in (_AUTHOR_RUN, _INITIALS_RUN, _VANCOUVER_RUN):
         run = pattern.match(stripped)
         if not (run and len(run.group(1)) >= 6):
             continue
         authors = run.group(1).strip(" .,;&")
-        rest = _LEADING_ETAL.sub("", stripped[run.end():]).strip(" .,;")
+        rest = _LEADING_ETAL.sub("", stripped[run.end():]).strip(" .,;:")
+        rest = _LEADING_YEAR.sub("", rest)
         if len(rest) >= 8:
             title, venue = _first_sentence(rest)
             return authors, title, venue
@@ -269,38 +382,130 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
         # A long head with no initials is far more likely to be the title.
         if not re.search(r"[A-Z]\.", head) and len(head.split()) > 6:
             return "", head, ". ".join(parts[1:])[:200]
+        # ACM prints the year as a sentence of its own between the authors and
+        # the title ("Tesfaye Bosona. 2020. Urban freight…"), so the slot after
+        # the authors is not always the title. Take the first part that is more
+        # than a bare year, or the reference resolves on the string "2020".
+        rest = [p for p in parts[1:] if not _YEAR_ONLY.match(p)]
+        if rest:
+            return head, rest[0], ". ".join(rest[1:])[:200]
         return head, parts[1], ". ".join(parts[2:])[:200]
 
     return "", _first_sentence(stripped)[0], ""
 
 
 def _first_sentence(text: str) -> tuple[str, str]:
-    m = re.match(r"^(.{5,300}?)\.\s+(.*)$", text)
+    # "?" and "!" close a title as surely as "." does, and review literature is
+    # full of them ("What kind of review should I conduct?"). The question mark
+    # is part of the title and stays; a full stop is punctuation and goes.
+    m = re.match(r"^(.{5,300}?)([.?!])\s+(.*)$", text)
+    if m:
+        title = m.group(1).strip() + (m.group(2) if m.group(2) in "?!" else "")
+        return title, m.group(3).strip()[:200]
+    # Elsevier separates title from venue with a comma and no period at all
+    # ("Urban freight logistics, Logistics 4 (2020) 24-38"), so without a
+    # sentence break the whole tail — volume, pages and year — becomes the
+    # title. The venue is the part carrying the numbers, so cut at the first
+    # comma whose remainder has any; a comma inside a title rarely does.
+    m = re.match(r"^(.{5,300}?),\s+([^,]*\d.*)$", text)
     if m:
         return m.group(1).strip(), m.group(2).strip()[:200]
     return text.strip(" .")[:300], ""
 
 
 def index_references(references: list[Reference]) -> dict[str, Reference]:
-    return {ref.key: ref for ref in references}
+    """Map each entry onto its own key, dropping keys two entries share.
+
+    Numbered entries are unique by construction, but an author-year key is not:
+    two unrelated 2022 papers whose first author is named Li both key to
+    "li2022". Keeping either one silently hands "(Li et al., 2022)" whichever
+    entry happened to be parsed last, and the reader is then shown a verdict on
+    a source the author never cited. Reporting the marker as unmatched is the
+    honest outcome, and the same trade the alias index already makes.
+    """
+    counts: dict[str, int] = {}
+    for ref in references:
+        counts[ref.key] = counts.get(ref.key, 0) + 1
+    return {ref.key: ref for ref in references if counts[ref.key] == 1}
+
+
+# "Agatz, N." / "Betti Sorbelli, F." -- surname first, confirmed by the initials
+# that follow it. Without that confirmation "Rashid Alyassi, Majid Khonji" would
+# read as a two-word surname followed by a co-author.
+_SURNAME_FIRST = re.compile(
+    rf"^\s*({_NAME_RUN})\s*,\s*(?:[{_L}]\.|[{_U}]{{1,3}}\b(?!\s*[{_L}]))"
+)
+# "N Agatz" / "KW Chen" / "J.-M. Sullivan" -- initials first, surname after.
+_INITIALS_FIRST = re.compile(rf"^\s*{_INITIALS_HEAD}({_NAME_RUN})")
+# "Rashid Alyassi" -- a spelled-out given name, indistinguishable from a two-word
+# surname here, so both words are kept and the alias index tries each.
+_BARE_NAME = re.compile(rf"^\s*({_NAME_RUN})")
+
+
+# An author's name in any of the orders above, for locating the *start* of an
+# entry rather than reading the surname out of one. The leading initials are
+# optional, which covers surname-first and spelled-out-given-name styles too.
+_AUTHOR_HEAD = rf"(?:{_INITIALS_HEAD})?{_NAME_RUN}"
+# What separates that first author from the year is more authors — letters,
+# initials, separators, "et al." Admitting no digits, colons or brackets is what
+# keeps a venue line ("Transportation Science, 12:3-4 (2019)") from reading as an
+# author list, since volume and page numbers cannot survive the class.
+_AUTHOR_LIST = rf"[{_L}\s.,;&'’{_DASH}]{{0,200}}"
+# The period ending the previous entry, but never the period after an initial:
+# "…, A. Karapetyan, S. Chau & C. Tseng (2017)" otherwise splits at every author,
+# and each tail fragment still carries a surname and that year, so it builds a
+# plausible-looking reference that no marker will ever point at.
+_ENTRY_HEAD = re.compile(
+    rf"(?<=[.])(?<![{_U}]\.)\s+"
+    rf"(?={_AUTHOR_HEAD}{_AUTHOR_LIST}\(\s*(?:19|20)\d{{2}}[a-z]?\s*\))"
+)
+
+
+def _entry_surname(text: str) -> str:
+    """The surname phrase an author-year marker would print for *text*.
+
+    Bibliographies disagree on author order, and picking the first capitalised
+    word regardless is wrong for the majority of them: it yields the given name
+    for "Rashid Alyassi", and for "N Agatz" it matches nothing at all, because a
+    lone initial is not a name word. The latter is the damaging case — an entry
+    with no derivable key is dropped outright, so an entire initials-first
+    bibliography parses down to only those entries that happened to spell their
+    first author's given name in full.
+    """
+    for pattern in (_SURNAME_FIRST, _INITIALS_FIRST, _BARE_NAME):
+        match = pattern.match(text)
+        if match:
+            return match.group(1).strip()
+    return ""
 
 
 def _leading_surname(ref: Reference) -> str:
     """The surname phrase an author-year marker would print for this entry."""
-    match = re.match(rf"\s*({_NAME}(?:\s+{_NAME})?)", ref.authors or ref.raw)
-    return match.group(1).strip() if match else ""
+    return _entry_surname(ref.authors or ref.raw)
+
+
+def _name_words(phrase: str) -> list[str]:
+    """The name words in *phrase*, dropping initials.
+
+    "David C. Edwards" is cited as "Edwards", never as "C", so an initial is
+    noise in an alias — and a one-letter alias would collide across unrelated
+    entries and get discarded as ambiguous, taking a real surname alias with it.
+    """
+    return [w for w in phrase.split() if len(w.rstrip(".")) > 1]
 
 
 def _author_year_aliases(ref: Reference) -> set[str]:
     """Every author-year key that could plausibly point at *ref*."""
     if not ref.year:
         return set()
-    words = _leading_surname(ref).split()
+    words = _name_words(_leading_surname(ref))
     if not words:
         return set()
-    # A two-word surname may be cited by either word or by both ("Betti
-    # Sorbelli, 2024" vs "Sorbelli, 2024"), and which one the marker uses is not
-    # recoverable from the bibliography, so index all three spellings.
+    # Which part of a name the marker prints is not recoverable from the
+    # bibliography: a two-word surname may be cited by either word or by both
+    # ("Betti Sorbelli, 2024" vs "Sorbelli, 2024"), and a spelled-out given name
+    # ("Seyed Mahdi Shavarani") is cited by the surname buried at the end. So
+    # index every word and the joined form, and let the marker pick.
     candidates = [normalise_key(w, ref.year) for w in words]
     candidates.append(normalise_key("".join(words), ref.year))
     # A word of pure punctuation normalises away to a bare year; that is not a

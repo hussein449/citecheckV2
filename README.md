@@ -231,16 +231,34 @@ knowing per reference:
   most sources return only an abstract. Verdicts are made on that, and the
   report says so per reference. Setting `CITECHECK_CONTACT_EMAIL` measurably
   reduces how often this happens.
-- **Reference parsing is heuristic.** It handles the common numeric and
-  author–year styles, both "Surname, A.B." and "A.B. Surname", accented names,
-  and identifiers split across line breaks — but bibliographies are endlessly
-  inventive.
+- **Reference parsing is heuristic.** APA, Harvard, Vancouver, IEEE, ACM,
+  Nature, Chicago, MLA and the Elsevier/Springer numbered styles are covered by
+  tests, in every author order — "Surname, A.B.", "A.B. Surname", "AB Surname"
+  and spelled-out given names — along with accented and double-barrelled
+  surnames, two-column layouts, and identifiers split across line breaks. But
+  bibliographies are endlessly inventive, so when parsing does come up empty the
+  report says so instead of reporting a clean result: a run that checked nothing
+  is never shown as "No integrity problems found".
 - **`not_found` is deliberately conservative.** A fabricated reference with a
   plausible title may land in `unconfirmed` rather than `not_found`. That is the
   intended trade: the report says it could not be matched and asks you to check,
   rather than risk accusing an author of inventing a real paper.
 - **A verdict is a prompt to look, not a judgement.** `unrelated` means read it
   yourself. The screenshots exist so that takes seconds.
+
+## Tests
+
+No dependencies beyond the app's own, and no network:
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+`tests/test_styles.py` is the format-coverage guarantee — every bibliography and
+in-text marker style is written out in the file, so it runs on any checkout.
+`tests/test_corpus.py` re-parses the real papers that have broken the parser
+before; those PDFs are published articles and are not committed, so it skips
+whatever is missing. See `tests/corpus/README.md` to populate it.
 
 ## Layout
 
@@ -256,4 +274,8 @@ citecheck/
   crosscheck.py        author-mismatch, duplicate, retraction and existence flags
   shots.py             header + highlighted-evidence screenshots
   pipeline.py          orchestration + screening risk summary
+tests/
+  test_styles.py       bibliography + marker styles, self-contained
+  test_corpus.py       real papers that have broken the parser
+  test_report.py       the screening headline, incl. the empty-run guard
 ```

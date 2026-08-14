@@ -7,6 +7,9 @@
 runs/
 uploads/
 
+# Regression corpus: published papers, kept locally, never redistributed.
+tests/corpus/*.pdf
+
 # Python
 __pycache__/
 *.py[cod]

@@ -329,6 +329,28 @@ def risk_summary(stats: dict) -> dict:
     verdicts = stats.get("verdicts", {})
     checked = max(1, stats.get("references_checked", 0))
 
+    # A run that checked nothing has found nothing, which is not the same as
+    # having found nothing wrong. Falling through to "clear" here puts a green
+    # "No integrity problems found" on top of a report whose own subtitle reads
+    # "0 of 0 cited references checked" — the one outcome a reader is most
+    # likely to act on and least able to detect. Say which stage came up empty,
+    # because that is what tells them whether to trust the paper or re-run it.
+    if not stats.get("references_checked", 0):
+        if not stats.get("citations_found", 0):
+            why = ("no in-text citation markers were recognised in the body "
+                   "text — the paper may be scanned images rather than text")
+        elif not stats.get("references_parsed", 0):
+            why = ("the bibliography could not be read, so no marker had "
+                   "anything to match against")
+        else:
+            why = ("none of the in-text markers matched an entry in the "
+                   "bibliography, so no reference could be traced to a source")
+        return {
+            "level": "review",
+            "headlines": [f"Nothing was checked: {why}.",
+                          "This is not a clean result — the paper was not screened."],
+        }
+
     headlines: list[str] = []
     level = "clear"
 
