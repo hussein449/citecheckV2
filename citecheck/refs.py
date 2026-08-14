@@ -285,6 +285,47 @@ def index_references(references: list[Reference]) -> dict[str, Reference]:
     return {ref.key: ref for ref in references}
 
 
+def _leading_surname(ref: Reference) -> str:
+    """The surname phrase an author-year marker would print for this entry."""
+    match = re.match(rf"\s*({_NAME}(?:\s+{_NAME})?)", ref.authors or ref.raw)
+    return match.group(1).strip() if match else ""
+
+
+def _author_year_aliases(ref: Reference) -> set[str]:
+    """Every author-year key that could plausibly point at *ref*."""
+    if not ref.year:
+        return set()
+    words = _leading_surname(ref).split()
+    if not words:
+        return set()
+    # A two-word surname may be cited by either word or by both ("Betti
+    # Sorbelli, 2024" vs "Sorbelli, 2024"), and which one the marker uses is not
+    # recoverable from the bibliography, so index all three spellings.
+    candidates = [normalise_key(w, ref.year) for w in words]
+    candidates.append(normalise_key("".join(words), ref.year))
+    # A word of pure punctuation normalises away to a bare year; that is not a
+    # name and would match any entry published that year.
+    return {key for key in candidates if key != ref.year}
+
+
+def _alias_index(references: list[Reference]) -> dict[str, Reference]:
+    """Map author-year keys onto the entries of a numbered bibliography.
+
+    A paper may number its reference list while citing it as "(Bosona, 2020)" —
+    Word's numbered-list styling does exactly this. The two key schemes then
+    never meet on an exact lookup, so every marker in the paper is reported as
+    an orphan and nothing gets checked at all.
+    """
+    candidates: dict[str, list[Reference]] = {}
+    for ref in references:
+        for alias in _author_year_aliases(ref):
+            candidates.setdefault(alias, []).append(ref)
+    # An alias two entries both answer to cannot be resolved from the marker
+    # alone. Verifying a claim against the wrong source is a worse failure than
+    # reporting the marker as an orphan, so drop the ambiguous ones.
+    return {alias: found[0] for alias, found in candidates.items() if len(found) == 1}
+
+
 def link_citations(
     grouped: dict[str, list],
     ref_index: dict[str, Reference],
@@ -292,8 +333,9 @@ def link_citations(
     """Return the references that are actually cited, plus unmatched keys."""
     matched: dict[str, Reference] = {}
     orphans: list[str] = []
+    aliases = _alias_index(list(ref_index.values()))
     for key in grouped:
-        ref = ref_index.get(key)
+        ref = ref_index.get(key) or aliases.get(key)
         if ref:
             matched[key] = ref
         else:

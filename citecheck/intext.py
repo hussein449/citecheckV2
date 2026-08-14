@@ -13,17 +13,32 @@ from dataclasses import dataclass, asdict
 # Numeric styles: [1] [1,2] [1, 2] [1-3] [1–3] [1,3-5]
 _NUMERIC = re.compile(r"\[\s*(\d{1,3}(?:\s*[-–—,;]\s*\d{1,3})*)\s*\]")
 
+# Surnames routinely carry non-ASCII letters (Eißfeldt, Osório, Muñoz), so the
+# name classes have to be Unicode-aware. An ASCII-only class stops at the first
+# such letter, which loses the marker entirely rather than merely truncating it.
+_U = r"A-ZÀ-ÖØ-Þ"
+_L = r"A-Za-zÀ-ÖØ-öø-ÿĀ-ſ"
+_NAME_WORD = rf"[{_U}][{_L}'’\-]+"
+# A surname printed as two words: "Betti Sorbelli", "Rojas Viloria".
+_SURNAME = rf"{_NAME_WORD}(?:\s+{_NAME_WORD})?"
+# "Smith" / "Smith et al." / "Smith & Jones". "et al." has to stand on its own:
+# unlike "and"/"&" it is never followed by another surname, and requiring one
+# there silently drops every multi-author citation in the paper.
+_AUTHORS = rf"{_SURNAME}(?:\s+et\s+al\.?|\s*(?:and|&)\s*{_SURNAME})?"
+
 # Author-year styles: (Smith, 2019) (Smith & Jones 2019; Doe et al., 2020)
 _AUTHOR_YEAR = re.compile(
-    r"\(\s*([A-Z][A-Za-z'’\-]+(?:\s+(?:et\s+al\.?|and|&)\s+[A-Z][A-Za-z'’\-]+)?"
-    r"(?:\s*,\s*)?\s*(?:19|20)\d{2}[a-z]?"
-    r"(?:\s*;\s*[^()]{3,60}?(?:19|20)\d{2}[a-z]?)*)\s*\)"
+    rf"\(\s*({_AUTHORS}(?:\s*,\s*)?\s*(?:19|20)\d{{2}}[a-z]?"
+    rf"(?:\s*;\s*[^()]{{3,80}}?(?:19|20)\d{{2}}[a-z]?)*)\s*\)"
 )
 
 # Narrative author-year: Smith et al. (2019) showed ...
+# The surname stays one word here. The parenthetical form is anchored by its
+# opening bracket, but this one is not, so allowing a second word would let an
+# ordinary preceding word be read as part of the name ("However Smith (2019)").
 _NARRATIVE = re.compile(
-    r"\b([A-Z][A-Za-z'’\-]+(?:\s+(?:et\s+al\.?|and|&)\s+[A-Z][A-Za-z'’\-]+)?)"
-    r"\s*\(\s*((?:19|20)\d{2}[a-z]?)\s*\)"
+    rf"\b({_NAME_WORD}(?:\s+et\s+al\.?|\s*(?:and|&)\s*{_NAME_WORD})?)"
+    rf"\s*\(\s*((?:19|20)\d{{2}}[a-z]?)\s*\)"
 )
 
 # Abbreviations that must not end a sentence. Checked in Python rather than in
@@ -113,7 +128,7 @@ def _author_year_keys(group: str) -> list[tuple[str, str]]:
     for chunk in re.split(r"\s*;\s*", group):
         chunk = chunk.strip()
         year = re.search(r"((?:19|20)\d{2})[a-z]?", chunk)
-        name = re.match(r"([A-Z][A-Za-z'’\-]+)", chunk)
+        name = re.match(rf"({_NAME_WORD})", chunk)
         if year and name:
             out.append((normalise_key(name.group(1), year.group(1)), chunk))
     return out
