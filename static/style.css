@@ -462,3 +462,67 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
   .hero h1 { font-size: 25px; }
   .results-actions { width: 100%; }
 }
+
+/* ── Print / Export as PDF ──────────────────────────────────
+   The screen layout is already document-shaped, so exporting is mostly a
+   matter of taking the application away from around the report: the upload
+   form, the filter row, the buttons, and everything else that only does
+   anything when clicked. */
+
+.print-only { display: none; }
+
+@media print {
+  @page { size: A4; margin: 14mm 12mm; }
+
+  html, body { background: #fff; }
+  body {
+    /* Verdict colour is the only thing carrying severity here, so it has to
+       survive the printer's habit of dropping backgrounds. Without this the
+       badges all come out the same shade and the report loses its meaning. */
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    font-size: 10.4pt;
+  }
+  .wrap { max-width: none; padding: 0; }
+  .print-only { display: block; }
+
+  .topbar, .foot, .filters, .results-actions,
+  .lightbox, #panel-upload, #panel-progress, .chev { display: none !important; }
+
+  /* On screen the panels are cards floating on grey; on paper they are just
+     the page, and the borders only add clutter. */
+  .panel { box-shadow: none; border: 0; border-radius: 0; padding: 0; margin: 0 0 16pt; }
+
+  /* Belt and braces: app.js opens every card before printing, so this only
+     matters if a card somehow missed the class. A collapsed card would print
+     as a bare heading. */
+  .card-body { display: block !important; }
+  /* ".open" is what forces the body visible, and it also carries the screen's
+     lifted shadow — which prints as a grey smudge round every card. It has to
+     be named here or it out-specifies the reset. */
+  .card, .card.open { box-shadow: none; border: 1px solid #d7dde5; margin-bottom: 10pt; }
+
+  /* Let a long card flow across pages — forcing it whole would leave a third
+     of a page blank before every reference that has three screenshots. Keep
+     the pieces that are unreadable when split intact instead, and never strand
+     a heading at the foot of a page. */
+  .card, .section { break-inside: auto; page-break-inside: auto; }
+  .card-head, h1, h2, h3, h4 { break-after: avoid; page-break-after: avoid; }
+  .claim, .quote, .flag, .verbatim, .tile,
+  .shot figure, .risk { break-inside: avoid; page-break-inside: avoid; }
+
+  /* Two screenshots to a row keeps them legible; auto-fit would put three
+     across the wider print canvas and shrink the highlighted passage to
+     nothing, which is the one thing the reader is meant to be able to read. */
+  .shots { grid-template-columns: repeat(2, 1fr); gap: 10pt; }
+  .shot img { cursor: auto; max-width: 100%; height: auto; }
+
+  /* A hyperlink is dead ink on paper, so the destination is spelled out.
+     Only external ones: the in-manuscript page links point back at this
+     server and would be noise in a file sent to someone else. */
+  .card-body a[href^="http"]::after {
+    content: " (" attr(href) ")";
+    font-size: 8.2pt; color: #5a6472; word-break: break-all;
+  }
+  .shot-link { display: none; }
+}

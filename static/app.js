@@ -420,6 +420,90 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") $("lightbox").hidden = true;
 });
 
+/* ── Export ─────────────────────────────────────────────── */
+
+/* Printing is the export: the report is already a document, the screenshots
+   are already on the page, and the browser's own "Save as PDF" produces a file
+   the reader can hand on. Generating a PDF server-side would mean rendering
+   this same page in headless Chromium — the copy of it that takes the
+   screenshots — for a worse result, because it cannot see which filter the
+   reader is looking at. */
+$("exportPdf").addEventListener("click", async () => {
+  const button = $("exportPdf");
+  const cards = [...document.querySelectorAll("#cards .card")];
+  /* A collapsed card prints as a heading and nothing else, so every card is
+     opened for the export and put back exactly as the reader had it. */
+  const wasOpen = cards.map((card) => card.classList.contains("open"));
+  const restore = () => cards.forEach((card, i) => card.classList.toggle("open", wasOpen[i]));
+
+  button.disabled = true;
+  button.textContent = "Preparing…";
+  try {
+    cards.forEach((card) => card.classList.add("open"));
+    /* Evidence screenshots are the point of the report, and they are lazy on
+       screen — which means that on a long report almost none of them have been
+       fetched, because almost none have been scrolled to. Opening the cards is
+       not enough: a lazy image below the viewport stays unfetched, and would
+       print as an empty box. Ask for them all, then wait. */
+    const missing = await imagesSettled($("cards"), (loaded, total) => {
+      // On a large report this takes tens of seconds. A button that sits on
+      // "Preparing…" that long reads as a hang, and the reader clicks again.
+      button.textContent = `Preparing… ${loaded}/${total}`;
+    });
+    $("printMeta").textContent = exportCaption(missing);
+    window.addEventListener("afterprint", restore, { once: true });
+    window.print();
+  } finally {
+    restore();
+    button.disabled = false;
+    button.textContent = "Export as PDF";
+  }
+});
+
+/* The PDF outlives the screen it was exported from, so it has to say what it
+   contains. A filtered export is a legitimate thing to send someone — "here
+   are the five that don't check out" — but only if it admits it is a subset. */
+function exportCaption(missingShots = 0) {
+  const total = (currentReport?.references || []).length;
+  const shown = document.querySelectorAll("#cards .card").length;
+  const scope = activeFilter === "all"
+    ? `All ${total} checked reference${total === 1 ? "" : "s"}`
+    : `Filtered to “${VERDICT_LABEL[activeFilter] || activeFilter}” — ${shown} of ${total} checked references`;
+  /* If the export goes out with blank evidence boxes, the file has to say so.
+     A reader cannot tell a screenshot that failed to load from one that was
+     never captured, and the second would look like the check was skipped. */
+  const gap = missingShots
+    ? ` · ${missingShots} screenshot${missingShots === 1 ? "" : "s"} did not load and appear blank — re-export to include them`
+    : "";
+  return `${scope} · exported ${new Date().toLocaleString()}${gap}`;
+}
+
+/* Resolves with the number of images that never arrived. */
+function imagesSettled(root, onProgress = () => {}, timeout = 60000) {
+  const images = [...root.querySelectorAll("img")];
+  images.forEach((img) => {
+    // Overrides loading="lazy", which is right for the screen and wrong here.
+    if (img.loading === "lazy") img.loading = "eager";
+    img.decoding = "sync";
+  });
+
+  const pending = images.filter((img) => !img.complete);
+  let done_ = images.length - pending.length;
+  onProgress(done_, images.length);
+
+  const settled = Promise.all(pending.map((img) => new Promise((done) => {
+    const tick = () => { onProgress(++done_, images.length); done(); };
+    img.addEventListener("load", tick, { once: true });
+    img.addEventListener("error", tick, { once: true });
+  })));
+  // A publisher screenshot that never arrives must not hold the export open
+  // for ever; the caption above owns up to whatever is missing.
+  const capped = new Promise((done) => setTimeout(done, timeout));
+
+  return Promise.race([settled, capped])
+    .then(() => images.filter((img) => !img.complete || !img.naturalWidth).length);
+}
+
 /* ── Misc ───────────────────────────────────────────────── */
 
 $("startOver").addEventListener("click", () => {
