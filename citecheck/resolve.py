@@ -16,9 +16,12 @@ Two things beyond a link come out of this stage:
     difference is what separates a fabricated citation from an inaccessible one.
     Transport failures are recorded separately from clean misses, so an index
     being unreachable can never be mistaken for the index saying "no".
-  * **Integrity.** Crossref and OpenAlex both report whether a work has been
-    retracted or corrected. Citing retracted work is a desk-reject trigger, so
-    it is worth a network call to find out.
+  * **Integrity.** Crossref and OpenAlex both report notices published against a
+    work. Only retractions are surfaced: citing retracted work is a desk-reject
+    trigger, so it is worth a network call to find out. Corrections and errata
+    are still collected — a retraction notice arrives through the same list —
+    but they are not reported, because an amended paper says nothing about
+    whether the citation matches the reference.
 """
 
 from __future__ import annotations

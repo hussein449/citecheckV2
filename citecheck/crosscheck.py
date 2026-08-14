@@ -179,18 +179,10 @@ def source_flags(source) -> list[Flag]:
                 ),
             )
         )
-    elif getattr(source, "integrity", None):
-        kinds = sorted({i["kind"] for i in source.integrity})
-        flags.append(
-            Flag(
-                kind="corrected-source",
-                severity="medium",
-                message=(
-                    f"The cited work carries a published {', '.join(kinds)}. Check that "
-                    "the claim survives the correction."
-                ),
-            )
-        )
+    # A published erratum or corrigendum is deliberately *not* flagged. It says
+    # the cited work was amended, not that the citation misrepresents it, and
+    # this report answers only the latter. Retractions stay: a retracted work
+    # cannot support any claim, whatever the citing sentence says.
 
     existence = getattr(source, "existence", "")
     if existence == "not_found":

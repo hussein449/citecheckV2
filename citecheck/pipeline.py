@@ -220,16 +220,12 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
     flagged = 0
     retracted = 0
     not_found = 0
-    corrected = 0
     claims_judged = 0
     for entry in report.references:
         verdicts[entry["verdict"]] = verdicts.get(entry["verdict"], 0) + 1
         claims_judged += len(entry.get("claim_verdicts") or [])
-        source = entry.get("source") or {}
-        if source.get("retracted"):
+        if (entry.get("source") or {}).get("retracted"):
             retracted += 1
-        elif source.get("integrity"):
-            corrected += 1
         if entry["verdict"] == "not_found":
             not_found += 1
         for flag in entry.get("flags", []):
@@ -241,7 +237,6 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
     report.stats["verdicts"] = verdicts
     report.stats["flagged"] = flagged
     report.stats["retracted"] = retracted
-    report.stats["corrected"] = corrected
     report.stats["not_found"] = not_found
     report.stats["claims_judged"] = claims_judged
     report.stats.update(_engine_outcome(report))

@@ -201,10 +201,6 @@ function renderTally(stats) {
     tiles.unshift(`<div class="tile unrelated"><span class="n">${stats.retracted}</span>
                      <span class="k">Retracted</span></div>`);
   }
-  if (stats.corrected) {
-    tiles.push(`<div class="tile weak"><span class="n">${stats.corrected}</span>
-                  <span class="k">Corrected</span></div>`);
-  }
   $("tally").innerHTML = tiles.join("");
 }
 
@@ -246,7 +242,6 @@ function urgency(entry) {
   let score = CONCERN[entry.verdict] || 0;
   if (entry.source?.retracted) score = Math.max(score, 6.5);
   else if ((entry.flags || []).some((f) => f.severity === "high")) score = Math.max(score, 4.5);
-  else if ((entry.source?.integrity || []).length) score = Math.max(score, 3.5);
   return score;
 }
 
@@ -304,7 +299,11 @@ function cardHtml(entry) {
             </span></blockquote>`).join("") || "<p class='status'>No sentence captured.</p>"
       }</div>`;
 
-  const integrity = (src.integrity || []).length
+  /* Only retractions are surfaced. Corrections and errata are still collected
+     — the retraction notice itself comes out of this list — but a published
+     erratum says nothing about whether the citation matches the reference,
+     which is the only question this report answers. */
+  const integrity = src.retracted && (src.integrity || []).length
     ? `<div class="section"><h4>Published notices on this work</h4>
         <ul class="meta-list">${src.integrity
           .map((i) => `<li><strong>${esc(cap(i.kind))}</strong>${i.date ? ` (${esc(i.date)})` : ""}${
