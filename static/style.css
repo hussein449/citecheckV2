@@ -400,6 +400,37 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
   margin: 7px 0 0; padding: 8px 11px; border-radius: 6px; font-size: 12.8px;
   background: var(--mid-bg); color: var(--ink-2); line-height: 1.5;
 }
+/* The judged clause is the blockquote above; this is the sentence it was cut
+   from, so a reader can see the slice was the right one. Deliberately quieter
+   than the claim — it is corroboration, not the finding. */
+.claim-context {
+  margin: 0 0 6px; font-size: 12.4px; color: var(--ink-dim); line-height: 1.5;
+}
+.claim-context span { font-weight: 600; color: var(--ink-2); }
+.revisited {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--info); background: var(--info-bg); padding: 2px 7px; border-radius: 999px;
+}
+
+/* ── Re-checking one reference ──────────────────────────── */
+.recheck {
+  border: 1px dashed var(--line-strong); border-radius: var(--radius);
+  padding: 13px 15px; background: var(--surface-2);
+}
+.recheck > h4 { margin-bottom: 6px; }
+.recheck > .status { margin-bottom: 11px; max-width: 62ch; }
+.recheck-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.recheck-pick { margin: 0; cursor: pointer; }
+.recheck-hint { font-size: 11.5px; color: var(--ink-dim); }
+.recheck-was { margin: 10px 0 0; font-size: 11.8px; color: var(--ink-dim); }
+.recheck-status { margin: 10px 0 0; font-size: 12.6px; }
+.recheck-status.working { color: var(--ink-dim); }
+.recheck-status.done { color: var(--ok); font-weight: 550; }
+.recheck-status.error { color: var(--bad); font-weight: 550; }
+/* Every control in the panel goes inert while a re-check is in flight — one of
+   them is a <label>, which cannot be disabled the way a button can. */
+.btn.busy { opacity: .55; pointer-events: none; }
+.chip.rechecked { background: var(--info-bg); color: var(--info); }
 
 .meta-list { list-style: none; margin: 0; padding: 0; font-size: 12.6px; color: var(--ink-dim); }
 .meta-list li { padding: 3px 0; word-break: break-word; }
@@ -486,8 +517,16 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
   .wrap { max-width: none; padding: 0; }
   .print-only { display: block; }
 
-  .topbar, .foot, .filters, .results-actions,
+  /* `.recheck` is a control panel, not a finding — on paper it is a dashed box
+     offering buttons nobody can press. What it *did* is kept: `.recheck-was`
+     records that a verdict came from a re-check, which the reader of an
+     exported PDF has every right to know. */
+  .topbar, .foot, .filters, .results-actions, .recheck-actions,
+  .recheck > .status, .recheck-status,
   .lightbox, #panel-upload, #panel-progress, .chev { display: none !important; }
+  .recheck { border: 0; padding: 0; background: none; }
+  .recheck:not(:has(.recheck-was)) { display: none !important; }
+  .recheck > h4 { display: none; }
 
   /* On screen the panels are cards floating on grey; on paper they are just
      the page, and the borders only add clutter. */

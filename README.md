@@ -27,7 +27,11 @@ Then open <http://127.0.0.1:5000>.
 For each numbered reference in an uploaded PDF:
 
 1. **Finds the citing sentences.** Handles `[1]`, `[1, 2]`, `[1-4]` and
-   author–year styles, expanding ranges and recording the page.
+   author–year styles, expanding ranges and recording the page. Each marker is
+   then cut down to the clause it actually governs — see
+   [Per-claim judging](#per-claim-judging) — and bracketed numbers that cite
+   nothing (a value range, a table's row labels) are reported apart from real
+   unmatched markers rather than counted as citations.
 2. **Resolves the reference to a real source** — arXiv ID, DOI or bare URL from
    the entry itself, else a Crossref bibliographic lookup, cross-checked against
    OpenAlex, Semantic Scholar, Unpaywall and Europe PMC.
@@ -39,8 +43,9 @@ For each numbered reference in an uploaded PDF:
    machine-readable JATS XML from Europe PMC — otherwise the indexed abstract,
    which is always included in what gets judged so a paywalled source is still
    assessed on its real content rather than on a login page.
-6. **Judges each citing sentence separately** against the source and explains
-   every verdict. See [Per-claim judging](#per-claim-judging).
+6. **Judges each claim separately** against the source and explains every
+   verdict, re-reading the abstract before any harsh one stands. See
+   [Per-claim judging](#per-claim-judging).
 7. **Captures three pieces of evidence:**
    - **In your paper** — the citing sentence highlighted on its own page, so a
      questionable citation can be found instantly. Every page number in the
@@ -129,8 +134,46 @@ blob — returns a single verdict that is right about none of them and quietly
 hides the claim that was oversold.
 
 So each citing sentence is judged on its own, and the report keeps every
-per-claim verdict with the page it was made on. The headline verdict is a
-roll-up, and the two tiers roll up differently on purpose:
+per-claim verdict with the page it was made on.
+
+### The claim is the clause, not the sentence
+
+One sentence often makes several claims on several sources:
+
+> parameters such as soil moisture **[37]**, field temperature **[38]** and crop
+> yield **[39]** can all be predicted
+
+Each marker answers only for its own clause. Handing the whole sentence to all
+three asks each source to support the other two's content, and all three come
+back "weak" for failing to — a false finding on every one of them. So each
+marker is cut down to the span it governs (the last one keeps the trailing
+predicate the list depends on), and the full sentence rides along as *context*
+so the model can see what the clause depends on without holding this source
+answerable for the rest of it. A clause too thin to stand alone falls back to
+the whole sentence: half a claim is worse evidence than a shared one.
+
+Where several references are cited at one point — `[23-28]` — the judge is told
+how many, because a group citation asks each source for part of what the
+sentence says rather than all of it.
+
+### Harsh verdicts get a second reading
+
+`unrelated` and `weak` are accusations: they say the author cited something that
+does not say what they claimed. The commonest way to reach one wrongly is to
+judge against text that buries or misses the abstract — a publisher landing
+page, a bot-check stub, or forty pages of body text in which the one relevant
+paragraph never rose to the top.
+
+So the abstract is always passed to the model under a heading of its own rather
+than left to compete for attention inside the body text, and any `unrelated` or
+`weak` verdict is re-judged against that abstract before it is reported. If the
+second reading is kinder, it wins, and the report says the verdict was
+reconsidered and why.
+
+### Rolling up to one headline
+
+The headline verdict is a roll-up, and the two tiers roll up differently on
+purpose:
 
 - The **model tier** takes the *most concerning* per-claim verdict. When a model
   that has read both texts says a claim is unsupported, that is evidence, and
@@ -141,6 +184,28 @@ roll-up, and the two tiers roll up differently on purpose:
 
 `max_claims_per_reference` (default 6) bounds the model spend on a reference
 cited a dozen times.
+
+## Re-checking one reference
+
+Every reference card carries a **Check this one again** panel, because a verdict
+is a prompt to look and looking sometimes says the tool got it wrong. Re-running
+the whole paper to settle one reference costs minutes and re-does two hundred
+checks that were already right.
+
+- **Re-run the check** resolves, fetches, judges and screenshots that one
+  reference again. This is the answer to a publisher that was down, or a host
+  that stalled the run out of its time budget.
+- **Judge against a file…** takes a PDF or `.txt` you supply and judges the
+  citation against *that*. Resolution and fetching are skipped outright: you
+  have said which document this reference is, which is stronger evidence than
+  any bibliographic search.
+
+What the indices said — that the work exists, that it has or has not been
+retracted — is carried over untouched when you supply a file, because none of it
+was re-tested. Only the content verdict is replaced. The run's tally, screening
+banner and warnings are all recomputed from the entries, so a re-check that
+clears a finding clears it from the headline too, and the exported PDF records
+which verdicts came from a re-check.
 
 ## Judging engine
 
@@ -244,7 +309,9 @@ knowing per reference:
   intended trade: the report says it could not be matched and asks you to check,
   rather than risk accusing an author of inventing a real paper.
 - **A verdict is a prompt to look, not a judgement.** `unrelated` means read it
-  yourself. The screenshots exist so that takes seconds.
+  yourself. The screenshots exist so that takes seconds, and when the tool got
+  it wrong you can re-check that one reference — against your own copy of the
+  source if you have it. See [Re-checking one reference](#re-checking-one-reference).
 
 ## Tests
 
@@ -266,16 +333,17 @@ whatever is missing. See `tests/corpus/README.md` to populate it.
 app.py                 Flask server, upload + SSE progress
 citecheck/
   pdf_parse.py         PDF -> clean text, body/bibliography split
-  intext.py            citation markers + the sentence around them
+  intext.py            citation markers + the clause each one governs
   refs.py              bibliography -> structured entries
   resolve.py           entry -> URL, metadata, existence + retraction evidence
   fetch.py             retrieve source text (PDF/HTML/JATS), guarantee the abstract
   match.py             lexical scoring + per-claim model judging
   crosscheck.py        author-mismatch, duplicate, retraction and existence flags
   shots.py             header + highlighted-evidence screenshots
-  pipeline.py          orchestration + screening risk summary
+  pipeline.py          orchestration, screening risk summary, single-reference re-check
 tests/
   test_styles.py       bibliography + marker styles, self-contained
   test_corpus.py       real papers that have broken the parser
   test_report.py       the screening headline, incl. the empty-run guard
+  test_claims.py       claim scoping, marker precision, re-checking one reference
 ```

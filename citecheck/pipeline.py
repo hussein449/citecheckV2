@@ -15,8 +15,10 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
 from . import crosscheck, fetch, intext, match, pdf_parse, refs, resolve, shots
 
@@ -45,18 +47,34 @@ class Report:
     stats: dict = field(default_factory=dict)
     references: list[dict] = field(default_factory=list)
     orphan_keys: list[str] = field(default_factory=list)
+    # Markers whose number is past the end of the bibliography — "[126]" in a
+    # paper with 40 entries. Almost always a table row label rather than a
+    # citation, so they are reported apart from genuine unmatched markers.
+    out_of_range_keys: list[str] = field(default_factory=list)
+    # Warnings raised while reading the PDF. Anything a *reference* is
+    # responsible for is derived from the entries by `summarise`, so
+    # re-checking one reference can never leave a stale complaint behind.
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        """The finished report document.
+
+        `summarise` runs here rather than at the one call site that happens to
+        need it, so no caller can serve a half-built document: the tally, the
+        screening banner and the reference-level warnings are all derived from
+        the entries, and a copy of the report without them looks like a clean
+        result. It is idempotent, so calling this twice costs nothing.
+        """
+        return summarise({
             "run_id": self.run_id,
             "source_pdf": self.source_pdf,
             "paper_title": self.paper_title,
             "stats": self.stats,
             "references": self.references,
             "orphan_keys": self.orphan_keys,
-            "warnings": self.warnings,
-        }
+            "out_of_range_keys": self.out_of_range_keys,
+            "base_warnings": list(self.warnings),
+        })
 
 
 def _noop(_event: dict) -> None:
@@ -89,12 +107,27 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
     reference_list = refs.parse_references(parsed.references_text)
     ref_index = refs.index_references(reference_list)
     matched, orphans = refs.link_citations(grouped, ref_index)
-    report.orphan_keys = sorted(orphans, key=_sort_key)
 
-    if orphans:
+    # A numeric marker past the last entry in the bibliography is not a citation
+    # anyone could follow: it is a summary table's row label, a dataset id or a
+    # measurement in square brackets. Counting those as unmatched citations
+    # inflates the orphan warning with noise and buries the markers that really
+    # are numbering slips.
+    unmatched, out_of_range = _split_out_of_range(orphans, reference_list)
+    report.orphan_keys = sorted(unmatched, key=_sort_key)
+    report.out_of_range_keys = sorted(out_of_range, key=_sort_key)
+
+    if unmatched:
         report.warnings.append(
-            f"{len(orphans)} citation marker(s) had no matching bibliography entry: "
-            + ", ".join(sorted(orphans, key=_sort_key)[:12])
+            f"{len(unmatched)} citation marker(s) had no matching bibliography entry: "
+            + ", ".join(sorted(unmatched, key=_sort_key)[:12])
+        )
+    if out_of_range:
+        report.warnings.append(
+            f"{len(out_of_range)} bracketed number(s) were ignored as non-citations "
+            "— they sit past the end of the bibliography, which is what a table's "
+            "row labels look like: "
+            + ", ".join(f"[{k}]" for k in sorted(out_of_range, key=_sort_key)[:12])
         )
 
     ordered_keys = sorted(matched.keys(), key=_sort_key)
@@ -200,7 +233,6 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
             )
             results[key] = entry
             done += 1
-            report.warnings.append(f"[{key}] {entry['notes'][0]}")
             progress({
                 "stage": "check",
                 "message": f"[{entry['reference'].get('number') or key}] timed out — "
@@ -215,38 +247,102 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
         pool.shutdown(wait=False, cancel_futures=True)
 
     report.references = [results[k] for k in capped if k in results]
+    report.stats["elapsed_seconds"] = round(time.time() - started, 1)
+
+    data = report.to_dict()
+    save(run_dir, data)
+    progress({"stage": "done", "message": "Finished.", "percent": 100, "report": data})
+    return report
+
+
+def _split_out_of_range(
+    orphans: list[str], reference_list: list[refs.Reference]
+) -> tuple[list[str], list[str]]:
+    """Separate unmatched markers from bracketed numbers that cite nothing.
+
+    Only applied to numeric keys, and only when the bibliography both numbers
+    its entries and parsed cleanly enough for its last number to mean anything.
+
+    That second condition is what keeps this safe. A bibliography that parsed
+    down to a scattered 40 of its 150 entries has a "highest number" of maybe
+    148 or maybe 61, and measuring markers against it would quietly reclassify
+    real citations as table debris — turning a parsing failure into a silent
+    loss of coverage, which is worse than the noisy orphan list it replaces. So
+    the ceiling is trusted only when the parsed entries actually run up to it.
+    """
+    numbers = sorted({ref.number for ref in reference_list if ref.number is not None})
+    if len(numbers) < 3:
+        return list(orphans), []
+
+    ceiling = numbers[-1]
+    if numbers[0] > 2 or len(numbers) < ceiling * 0.8:
+        return list(orphans), []
+    unmatched: list[str] = []
+    out_of_range: list[str] = []
+    for key in orphans:
+        if key.isdigit() and int(key) > ceiling:
+            out_of_range.append(key)
+        else:
+            unmatched.append(key)
+    return unmatched, out_of_range
+
+
+def save(run_dir: Path, report: dict) -> None:
+    Path(run_dir).mkdir(parents=True, exist_ok=True)
+    (Path(run_dir) / "report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def summarise(report: dict) -> dict:
+    """Recompute the run-level tally, warnings and headline from the entries.
+
+    Split out of `run` because a reader can re-check one reference on its own,
+    and a report whose banner still counts a verdict that has since been
+    overturned is worse than one that was never re-checked at all. Everything
+    here is derived, so running it twice on the same entries changes nothing.
+    """
+    stats = report.setdefault("stats", {})
+    references = report.get("references") or []
+
+    # Reports written before per-reference re-checking existed kept only the
+    # merged warning list; treat that as the base rather than losing it.
+    base = report.get("base_warnings")
+    if base is None:
+        base = list(report.get("warnings") or [])
+        report["base_warnings"] = base
 
     verdicts: dict[str, int] = {}
-    flagged = 0
-    retracted = 0
-    not_found = 0
-    claims_judged = 0
-    for entry in report.references:
+    derived: list[str] = []
+    flagged = retracted = not_found = claims_judged = rechecked = 0
+
+    for entry in references:
         verdicts[entry["verdict"]] = verdicts.get(entry["verdict"], 0) + 1
         claims_judged += len(entry.get("claim_verdicts") or [])
         if (entry.get("source") or {}).get("retracted"):
             retracted += 1
         if entry["verdict"] == "not_found":
             not_found += 1
+        if entry.get("rechecked"):
+            rechecked += 1
+        if entry.get("timed_out") and entry.get("notes"):
+            derived.append(f"[{entry['key']}] {entry['notes'][0]}")
         for flag in entry.get("flags", []):
             if flag["severity"] == "high":
                 flagged += 1
-                report.warnings.append(f"[{entry['key']}] {flag['message']}")
+                derived.append(f"[{entry['key']}] {flag['message']}")
                 break
 
-    report.stats["verdicts"] = verdicts
-    report.stats["flagged"] = flagged
-    report.stats["retracted"] = retracted
-    report.stats["not_found"] = not_found
-    report.stats["claims_judged"] = claims_judged
-    report.stats.update(_engine_outcome(report))
-    report.stats["risk"] = risk_summary(report.stats)
-    report.stats["elapsed_seconds"] = round(time.time() - started, 1)
+    stats["verdicts"] = verdicts
+    stats["flagged"] = flagged
+    stats["retracted"] = retracted
+    stats["not_found"] = not_found
+    stats["claims_judged"] = claims_judged
+    stats["rechecked"] = rechecked
+    stats.update(_engine_outcome(references, stats, derived))
+    stats["risk"] = risk_summary(stats)
 
-    (run_dir / "report.json").write_text(
-        json.dumps(report.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    progress({"stage": "done", "message": "Finished.", "percent": 100, "report": report.to_dict()})
+    report["warnings"] = list(dict.fromkeys(base + derived))
     return report
 
 
@@ -254,7 +350,7 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
 _ENGINE_DISPLAY = {"openai": "OpenAI", "lexical": "lexical word overlap"}
 
 
-def _engine_outcome(report: Report) -> dict:
+def _engine_outcome(references: list[dict], stats: dict, warnings: list[str]) -> dict:
     """Report the engine that actually produced the verdicts, not the one configured.
 
     Selecting an engine up front and printing that as the run's headline is how a
@@ -267,12 +363,12 @@ def _engine_outcome(report: Report) -> dict:
     resolved never reached the judge at all, and are excluded from the tally
     rather than counted as failures.
     """
-    eligible = [entry for entry in report.references if entry.get("engine")]
+    eligible = [entry for entry in references if entry.get("engine")]
     judged = [entry for entry in eligible if entry["engine"] != "lexical"]
-    planned = report.stats.get("engine_planned", "lexical")
+    planned = stats.get("engine_planned", "lexical")
     named = _ENGINE_DISPLAY.get(planned, planned)
 
-    stats = {
+    outcome = {
         "engine": judged[0]["engine"] if judged else "lexical",
         "references_judged_by_model": len(judged),
         "references_judgeable": len(eligible),
@@ -280,23 +376,23 @@ def _engine_outcome(report: Report) -> dict:
     }
 
     if planned == "lexical" or not eligible:
-        return stats
+        return outcome
 
     if not judged:
-        stats["engine_note"] = (
+        outcome["engine_note"] = (
             f"{named} judging was enabled but produced no verdicts — every result "
             "below is lexical word overlap, which can show that two texts discuss "
             "the same thing but never that a citation is wrong. The per-reference "
             "reasons say why each call failed."
         )
-        report.warnings.append(stats["engine_note"])
+        warnings.append(outcome["engine_note"])
     elif len(judged) < len(eligible):
-        stats["engine_note"] = (
+        outcome["engine_note"] = (
             f"{named} judged {len(judged)} of {len(eligible)} references with "
             "retrievable text; the rest fell back to lexical word overlap."
         )
 
-    return stats
+    return outcome
 
 
 # Findings that decide the screening headline, worst first. Each is
@@ -450,6 +546,9 @@ def _timed_out_entry(
         "fetched": {},
         "shots": {},
         "notes": [note],
+        # `summarise` raises the run-level warning from this, so re-checking the
+        # reference on its own clears the complaint along with the problem.
+        "timed_out": True,
         "flags": [
             f.to_dict()
             for f in crosscheck.check(key, reference, citations, duplicate_of)
@@ -515,8 +614,8 @@ def _check_one(
 
     # Each place the reference is cited is its own claim; scoring them
     # separately keeps a heavily-cited reference from looking weak.
-    claim_sentences = list(dict.fromkeys(c.sentence for c in citations))
-    entry["claim"] = " ".join(claim_sentences)[:2000]
+    claims = _claims_for(citations)
+    entry["claim"] = " ".join(dict.fromkeys(c.sentence for c in citations))[:2000]
 
     def snap(content=None, source=None, passages: list[str] | None = None) -> None:
         """Capture screenshots for whatever we managed to retrieve."""
@@ -638,7 +737,7 @@ def _check_one(
 
     on_stage("judging the claims against the retrieved text", "")
     verdict = match.judge(
-        claims=claim_sentences,
+        claims=claims,
         source_text=body,
         title=content.title or source.title,
         abstract=source.abstract,
@@ -646,13 +745,47 @@ def _check_one(
         use_model=options.use_model,
         max_claims=options.max_claims_per_reference,
     )
+    _apply_verdict(entry, verdict)
 
-    # Tie each per-claim judgement back to the page it was made on, so a
-    # disputed claim can be found in the PDF without hunting for it.
-    page_of = {c.sentence: c.page for c in citations}
-    for claim_verdict in verdict.claim_verdicts:
-        claim_verdict.page = page_of.get(claim_verdict.claim)
+    snap(content=content, source=source, passages=verdict.screenshot_passages())
+    return entry
 
+
+def _claims_for(citations: list[intext.Citation]) -> list[match.Claim]:
+    """The distinct things a reference is cited for, best evidence first.
+
+    Two narrowings happen here, and both exist because the alternative produces
+    verdicts about text nobody wrote as a claim:
+
+    * **Prose wins.** A reference cited from a comparison table *and* from three
+      sentences is asserting three things and nothing in the table. Judging a
+      row of column values returns "weak" about a row of column values.
+    * **The clause, not the sentence.** `intext` has already cut each marker
+      down to the span it governs; the full sentence rides along as context so
+      the model can see what the clause depends on without being asked to hold
+      this source responsible for the rest of it.
+    """
+    prose = [c for c in citations if c.prose]
+    claims: list[match.Claim] = []
+    seen: set[str] = set()
+    for cite in (prose or citations):
+        text = (cite.claim or cite.sentence).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        claims.append(
+            match.Claim(
+                text=text,
+                context=cite.sentence.strip(),
+                co_cited=cite.group_size,
+                page=cite.page,
+            )
+        )
+    return claims
+
+
+def _apply_verdict(entry: dict, verdict: match.MatchResult) -> None:
+    """Write one judgement onto an entry, headline and per-claim detail alike."""
     entry["verdict"] = verdict.verdict
     entry["score"] = round(verdict.score, 3)
     entry["reason"] = verdict.reason
@@ -661,8 +794,262 @@ def _check_one(
     entry["claim_verdicts"] = [c.to_dict() for c in verdict.claim_verdicts]
     entry["claim_tally"] = verdict.claim_tally()
 
-    snap(content=content, source=source, passages=verdict.screenshot_passages())
+
+# --------------------------------------------------------------------------- #
+# Re-checking one reference
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class SuppliedSource:
+    """A document the reader handed over for one specific reference."""
+
+    name: str
+    text: str
+    kind: str = "file"       # "pdf" | "text"
+
+
+def read_supplied(filename: str, data: bytes) -> SuppliedSource:
+    """Pull judgeable text out of an uploaded .pdf or .txt.
+
+    Raises ValueError with something a reader can act on, because this is the
+    one place in the pipeline where the input came from a person rather than
+    from the network, and "nothing happened" is not an acceptable answer.
+    """
+    name = Path(filename).name or "supplied"
+    lowered = name.lower()
+
+    if lowered.endswith(".pdf") or data[:5] == b"%PDF-":
+        title, text = fetch._pdf_text(data)
+        if not text.strip():
+            raise ValueError(
+                "No text could be read out of that PDF. Scanned page images "
+                "carry no text layer — a text file of the relevant pages works."
+            )
+        return SuppliedSource(name=title.strip() or name, text=text, kind="pdf")
+
+    if not lowered.endswith((".txt", ".text", ".md")):
+        raise ValueError("Please supply a PDF or a plain text (.txt) file.")
+
+    for encoding in ("utf-8", "utf-16", "cp1252", "latin-1"):
+        try:
+            text = data.decode(encoding)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    else:
+        text = data.decode("utf-8", errors="replace")
+
+    if len(text.strip()) < 40:
+        raise ValueError("That file holds too little text to judge a citation against.")
+    return SuppliedSource(name=name, text=text.strip(), kind="text")
+
+
+def _rebuild(cls, data: dict):
+    """Rebuild a dataclass from a stored dict, ignoring fields it no longer has."""
+    fields = {f.name for f in dataclass_fields(cls)}
+    return cls(**{k: v for k, v in (data or {}).items() if k in fields})
+
+
+def recheck_one(
+    run_dir: Path,
+    key: str,
+    options: Options,
+    paper_path: str = "",
+    supplied: SuppliedSource | None = None,
+) -> dict:
+    """Re-run a single reference and fold the result back into its report.
+
+    Two reasons a reader needs this. A reference can fail for reasons that have
+    nothing to do with the citation — a publisher that was down, a host that
+    stalled the whole run out of its time budget — and re-running just that one
+    costs seconds instead of re-screening the paper. And where the tool resolved
+    to the wrong document, or to a paywall it could not read, the reader often
+    has the actual paper on disk: `supplied` judges the citation against that
+    instead, which is better evidence than any lookup.
+
+    The re-checked entry replaces the old one in `report.json` and the run-level
+    tally, banner and warnings are all recomputed from it.
+    """
+    run_dir = Path(run_dir)
+    report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+
+    index = next(
+        (i for i, e in enumerate(report.get("references") or []) if e.get("key") == key),
+        None,
+    )
+    if index is None:
+        raise KeyError(f"No reference {key!r} in this report.")
+
+    previous = report["references"][index]
+    reference = _rebuild(refs.Reference, previous.get("reference"))
+    citations = [_rebuild(intext.Citation, c) for c in previous.get("citations") or []]
+    duplicate_of = _duplicate_of(previous)
+    shots_dir = run_dir / "shots"
+
+    try:
+        if supplied is not None:
+            entry = _check_supplied(
+                previous=previous,
+                reference=reference,
+                citations=citations,
+                supplied=supplied,
+                shots_dir=shots_dir,
+                options=options,
+                paper_path=paper_path,
+            )
+        else:
+            entry = _check_one(
+                key=key,
+                reference=reference,
+                citations=citations,
+                shots_dir=shots_dir,
+                options=options,
+                duplicate_of=duplicate_of,
+                paper_path=paper_path,
+            )
+    finally:
+        # This runs on a request thread, not on a pooled worker, so nothing else
+        # will ever come back to close the browser it just started.
+        if options.take_screenshots:
+            shots.close_thread_browser()
+
+    entry["rechecked"] = {
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "against": "supplied" if supplied is not None else "sources",
+        "filename": supplied.name if supplied is not None else "",
+        "previous_verdict": previous.get("verdict", ""),
+    }
+    # A verdict that has been re-run is no longer a casualty of the run's clock.
+    entry.pop("timed_out", None)
+
+    report["references"][index] = entry
+    summarise(report)
+    save(run_dir, report)
+    return report
+
+
+def _duplicate_of(entry: dict) -> str:
+    """Recover the duplicate-entry finding from a stored report."""
+    for flag in entry.get("flags") or []:
+        if flag.get("kind") == "duplicate-entry":
+            match_ = re.search(r"\[([^\]]+)\]", flag.get("message", ""))
+            if match_:
+                return match_.group(1)
+    return ""
+
+
+def _check_supplied(
+    previous: dict,
+    reference: refs.Reference,
+    citations: list[intext.Citation],
+    supplied: SuppliedSource,
+    shots_dir: Path,
+    options: Options,
+    paper_path: str = "",
+) -> dict:
+    """Judge one reference against a document the reader supplied.
+
+    Resolution and fetching are skipped outright. The reader has said which
+    document this reference is, which is stronger evidence than a bibliographic
+    search, and going back to the network could only substitute some other paper
+    for the one they handed over.
+
+    What the indices said — that the work exists, that it has or has not been
+    retracted — is carried over untouched, because none of that was re-tested
+    here and quietly dropping it would turn a real retraction finding into a
+    blank. Only the content verdict is replaced.
+    """
+    entry = dict(previous)
+    entry["notes"] = [
+        f"Judged against a document supplied by the reader: {supplied.name}. "
+        "The bibliographic lookup above is from the original run and was not repeated."
+    ]
+    entry["shots"] = {}
+    entry.pop("citing_shot", None)
+    entry.pop("citing_page", None)
+    entry["fetched"] = {
+        "url": "",
+        "final_url": "",
+        "kind": f"supplied {supplied.kind}",
+        "title": supplied.name,
+        "status": 0,
+        "ok": True,
+        "paywalled": False,
+        "has_abstract": False,
+        "notes": [],
+        "text": supplied.text[:1500],
+        "text_chars": len(supplied.text),
+    }
+
+    claims = _claims_for(citations)
+    entry["claim"] = " ".join(dict.fromkeys(c.sentence for c in citations))[:2000]
+
+    verdict = match.judge(
+        claims=claims,
+        source_text=supplied.text,
+        title=supplied.name or reference.title,
+        # Deliberately empty. The abstract on file belongs to whatever the run
+        # originally resolved to, and mixing it into the judgement of a document
+        # the reader supplied would score the citation against both at once.
+        abstract="",
+        reference_line=reference.raw,
+        use_model=options.use_model,
+        max_claims=options.max_claims_per_reference,
+    )
+    _apply_verdict(entry, verdict)
+
+    if not options.take_screenshots:
+        return entry
+
+    if paper_path:
+        citing_name, citing_page = shots.capture_citing(
+            pdf_path=paper_path,
+            out_dir=shots_dir,
+            stem=_safe_stem(entry["key"]),
+            sentences=[c.sentence for c in citations],
+            page_hint=citations[0].page if citations else None,
+        )
+        if citing_name:
+            entry["citing_shot"] = citing_name
+            entry["citing_page"] = citing_page
+
+    quotes = verdict.screenshot_passages()
+    excerpt = _excerpt_around(supplied.text, quotes[0] if quotes else "")
+    try:
+        entry["shots"] = {
+            "evidence": shots.render_abstract_card(
+                out_dir=shots_dir,
+                stem=_safe_stem(entry["key"]),
+                title=supplied.name,
+                abstract=excerpt,
+                quote=quotes[0] if quotes else "",
+                source_label="file supplied by the reader",
+                banner="SUPPLIED DOCUMENT - text you provided for this reference",
+                footnote=(
+                    "This reference was re-checked against a document you uploaded, "
+                    "not against anything retrieved from a publisher or an index."
+                ),
+            ),
+            "evidence_is_card": True,
+            "matched_text": quotes[0] if quotes else "",
+            "notes": [],
+        }
+    except Exception as exc:
+        entry["notes"].append(f"Evidence card failed: {type(exc).__name__}")
     return entry
+
+
+def _excerpt_around(text: str, quote: str, width: int = 2400) -> str:
+    """The part of a long document worth rendering onto the evidence card."""
+    text = re.sub(r"\n{3,}", "\n\n", text or "").strip()
+    if len(text) <= width:
+        return text
+    at = text.find((quote or "")[:120]) if quote else -1
+    if at < 0:
+        return text[:width] + " …"
+    lo = max(0, at - width // 3)
+    prefix = "… " if lo else ""
+    return prefix + text[lo : lo + width].strip() + " …"
 
 
 def _safe_stem(key: str) -> str:

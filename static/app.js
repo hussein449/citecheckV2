@@ -11,6 +11,12 @@ const panels = {
 let currentRun = null;
 let currentReport = null;
 let activeFilter = "all";
+/* Which cards the reader has expanded. Held by reference key rather than by DOM
+   node, because re-checking one reference rebuilds every card — and a card that
+   collapses itself the moment its verdict changes hides the very thing the
+   reader just asked for. */
+const openKeys = new Set();
+let recheckInFlight = false;
 
 /* Ordered by how much each verdict demands a look, worst first — the same
    ordering the report itself uses, so tiles, filters and cards all agree. */
@@ -144,14 +150,23 @@ function renderReport(report, runId) {
   currentReport = report;
   currentRun = runId;
   activeFilter = "all";
+  openKeys.clear();
   show("results");
+  refreshResults();
+}
 
+/* Everything downstream of `currentReport`, rebuilt from it. Called again after
+   a single reference is re-checked, so the banner, the tally and the filters
+   never keep counting a verdict that has since been overturned. */
+function refreshResults() {
+  const report = currentReport || {};
   const s = report.stats || {};
   $("resultTitle").textContent = report.paper_title || report.source_pdf;
   $("resultMeta").textContent = [
     `${s.pages ?? "?"} pages`,
     `${s.references_checked ?? 0} of ${s.references_cited ?? 0} cited references checked`,
     s.claims_judged ? `${s.claims_judged} individual claims judged` : null,
+    s.rechecked ? `${s.rechecked} re-checked by hand` : null,
     engineSummary(s),
     `${s.elapsed_seconds ?? "?"}s`,
   ].filter(Boolean).join(" · ");
@@ -254,7 +269,12 @@ function renderCards() {
     `<p class="status">Nothing in this category.</p>`;
 
   $("cards").querySelectorAll(".card-head").forEach((head) => {
-    head.addEventListener("click", () => head.parentElement.classList.toggle("open"));
+    head.addEventListener("click", () => {
+      const card = head.parentElement;
+      const open = card.classList.toggle("open");
+      if (open) openKeys.add(card.dataset.key);
+      else openKeys.delete(card.dataset.key);
+    });
   });
   $("cards").querySelectorAll(".shot img").forEach((img) => {
     img.addEventListener("click", (e) => {
@@ -262,6 +282,86 @@ function renderCards() {
       openLightbox(img.src, img.dataset.caption || "");
     });
   });
+  $("cards").querySelectorAll(".recheck-run").forEach((btn) => {
+    btn.addEventListener("click", () => runRecheck(btn.closest(".recheck").dataset.key, null));
+  });
+  $("cards").querySelectorAll(".recheck input[type=file]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const file = input.files?.[0];
+      // Cleared so picking the same file twice still fires a change event —
+      // re-running the identical document is a legitimate thing to want.
+      const key = input.closest(".recheck").dataset.key;
+      input.value = "";
+      if (file) runRecheck(key, file);
+    });
+  });
+}
+
+/* ── Re-checking one reference ──────────────────────────── */
+
+/* A verdict is a prompt to look, and looking sometimes says the tool got it
+   wrong: it resolved to the wrong paper, or read a paywall stub, or the
+   publisher was simply down. Re-running the whole paper to settle one reference
+   costs minutes and re-does 200 checks that were already right. */
+async function runRecheck(key, file) {
+  if (recheckInFlight) return;
+
+  const box = document.querySelector(`.recheck[data-key="${key}"]`);
+  const note = box?.querySelector(".recheck-status");
+  const controls = box ? [...box.querySelectorAll(".btn")] : [];
+
+  recheckInFlight = true;
+  openKeys.add(key);
+  controls.forEach((el) => el.classList.add("busy"));
+  setNote(note, "status working", file
+    ? `Judging this reference against ${file.name}…`
+    : "Looking this reference up again and re-reading the source…");
+
+  const body = new FormData();
+  body.append("key", key);
+  if (file) body.append("source", file);
+  body.append("use_model", $("useModel").checked && !$("useModel").disabled ? "1" : "0");
+  body.append("screenshots", $("useShots").checked && !$("useShots").disabled ? "1" : "0");
+
+  try {
+    const res = await fetch(`/api/recheck/${currentRun}`, { method: "POST", body });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Re-check failed (${res.status})`);
+
+    currentReport = data.report;
+    refreshResults();          // the card, and every control on it, is rebuilt
+    reportRecheck(key, data.entry);
+  } catch (err) {
+    setNote(note, "status error", err.message);
+  } finally {
+    recheckInFlight = false;
+    controls.forEach((el) => el.classList.remove("busy"));
+  }
+}
+
+function setNote(note, className, text) {
+  if (!note) return;
+  note.hidden = false;
+  note.className = `recheck-status ${className}`;
+  note.textContent = text;
+}
+
+/* Says what changed, not just that something happened. "Still unverified" is a
+   real answer and the reader needs to be told it plainly, or they will keep
+   pressing the button expecting a different one. */
+function reportRecheck(key, entry) {
+  const box = document.querySelector(`.recheck[data-key="${key}"]`);
+  if (!box || !entry) return;
+  const was = entry.rechecked?.previous_verdict;
+  const now = VERDICT_LABEL[entry.verdict] || entry.verdict;
+  setNote(
+    box.querySelector(".recheck-status"),
+    "status done",
+    was && was !== entry.verdict
+      ? `Re-checked: ${VERDICT_LABEL[was] || was} → ${now}.`
+      : `Re-checked — the verdict is still ${now}.`
+  );
+  box.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 function cardHtml(entry) {
@@ -277,7 +377,12 @@ function cardHtml(entry) {
     src.retracted ? `<span class="chip retracted">Retracted</span>` : "",
     !src.retracted && flags.some((f) => f.severity === "high")
       ? `<span class="chip flagged">Flagged</span>` : "",
+    entry.rechecked ? `<span class="chip rechecked">Re-checked</span>` : "",
   ].join("");
+
+  /* Evidence images are written back to the same filenames on a re-check, so
+     the browser would keep serving the pre-recheck capture from cache. */
+  const shotVersion = entry.rechecked?.at || "";
 
   const flagsHtml = flags.length
     ? `<div class="section"><h4>Flags</h4>${flags
@@ -311,20 +416,23 @@ function cardHtml(entry) {
           .join("")}</ul></div>`
     : "";
 
+  const suppliedEvidence = entry.rechecked?.against === "supplied";
   const shotBlocks = [];
   if (entry.citing_shot) {
     shotBlocks.push(shotHtml(entry.citing_shot,
       `In your paper${entry.citing_page ? ` — page ${entry.citing_page}` : ""}`,
-      entry.claim || "", `${paperUrl}#page=${entry.citing_page || 1}`));
+      entry.claim || "", `${paperUrl}#page=${entry.citing_page || 1}`, shotVersion));
   }
   if (shots.header) {
-    shotBlocks.push(shotHtml(shots.header, "Top of the source page", shots.page_title || title));
+    shotBlocks.push(shotHtml(shots.header, "Top of the source page",
+      shots.page_title || title, "", shotVersion));
   }
   if (shots.evidence) {
     shotBlocks.push(shotHtml(shots.evidence,
-      shots.evidence_is_card ? "Indexed abstract (page was not capturable)"
-                             : "Matching passage, highlighted",
-      shots.matched_text || ""));
+      suppliedEvidence ? `From the file you supplied — ${entry.rechecked.filename}`
+        : shots.evidence_is_card ? "Indexed abstract (page was not capturable)"
+                                 : "Matching passage, highlighted",
+      shots.matched_text || "", "", shotVersion));
   }
   const shotsHtml = shotBlocks.length
     ? `<div class="section"><h4>Evidence</h4><div class="shots">${shotBlocks.join("")}</div></div>`
@@ -353,7 +461,7 @@ function cardHtml(entry) {
     </div>`;
 
   return `
-  <article class="card">
+  <article class="card${openKeys.has(entry.key) ? " open" : ""}" data-key="${esc(entry.key)}">
     <div class="card-head">
       <span class="card-num">${esc(label)}</span>
       <span class="badge ${esc(entry.verdict)}">${esc(VERDICT_LABEL[entry.verdict] || entry.verdict)}</span>
@@ -367,6 +475,7 @@ function cardHtml(entry) {
       <div class="section"><h4>Verdict</h4>
         <p class="reason">${esc(entry.reason || "No explanation available.")}</p>
       </div>
+      ${recheckHtml(entry)}
       ${flagsHtml}
       ${claimsHtml}
       ${integrity}
@@ -376,26 +485,66 @@ function cardHtml(entry) {
   </article>`;
 }
 
+/* Sits directly under the verdict, because that is where a reader decides they
+   disagree with it. */
+function recheckHtml(entry) {
+  const done = entry.rechecked
+    ? `<p class="recheck-was">Last re-checked ${esc(entry.rechecked.at || "")}${
+        entry.rechecked.against === "supplied"
+          ? ` against <b>${esc(entry.rechecked.filename || "a supplied file")}</b>`
+          : " against the citation indexes"}.</p>`
+    : "";
+  return `
+    <div class="section recheck" data-key="${esc(entry.key)}">
+      <h4>Check this one again</h4>
+      <p class="status">Re-run this reference on its own — useful when the
+        publisher was down, or when the lookup landed on the wrong paper. If you
+        have the source yourself, hand it over and it will be judged against that
+        instead of against anything retrieved.</p>
+      <div class="recheck-actions">
+        <button type="button" class="btn ghost recheck-run">Re-run the check</button>
+        <label class="btn ghost recheck-pick">Judge against a file…
+          <input type="file" hidden
+                 accept=".pdf,.txt,.text,.md,application/pdf,text/plain">
+        </label>
+        <span class="recheck-hint">PDF or .txt</span>
+      </div>
+      ${done}
+      <p class="recheck-status" hidden></p>
+    </div>`;
+}
+
 function claimHtml(claim, paperUrl) {
   const verdict = claim.verdict || "unverified";
   const page = claim.page
     ? `<span class="where"><a href="${paperUrl}#page=${claim.page}" target="_blank" rel="noopener">page ${claim.page} ↗</a></span>`
     : "";
+  /* The claim is the clause the marker governs, which is usually narrower than
+     the sentence it sits in. Showing the sentence underneath is what lets a
+     reader confirm the right slice was judged — and see the other references
+     that carry the rest of it. */
+  const context = claim.context
+    ? `<p class="claim-context"><span>In full:</span> ${esc(truncate(claim.context, 400))}</p>`
+    : "";
+  const revisited = claim.reconsidered
+    ? `<span class="revisited">softened after re-reading the abstract</span>` : "";
   return `
     <div class="claim ${esc(verdict)}">
       <div class="claim-top">
         <span class="badge ${esc(verdict)}">${esc(VERDICT_LABEL[verdict] || verdict)}</span>
-        ${page}
+        ${page}${revisited}
       </div>
       <blockquote>${esc(claim.claim)}</blockquote>
+      ${context}
       <p class="why">${esc(claim.reason || "")}</p>
       ${claim.evidence_quote
         ? `<p class="verbatim">“${esc(truncate(claim.evidence_quote, 400))}”</p>` : ""}
     </div>`;
 }
 
-function shotHtml(filename, caption, alt, linkUrl) {
-  const url = `/runs/${currentRun}/shots/${encodeURIComponent(filename)}`;
+function shotHtml(filename, caption, alt, linkUrl, version) {
+  const url = `/runs/${currentRun}/shots/${encodeURIComponent(filename)}`
+    + (version ? `?v=${encodeURIComponent(version)}` : "");
   const link = linkUrl
     ? ` <a href="${linkUrl}" target="_blank" rel="noopener" class="shot-link">open ↗</a>`
     : "";
@@ -508,6 +657,7 @@ function imagesSettled(root, onProgress = () => {}, timeout = 60000) {
 
 $("startOver").addEventListener("click", () => {
   currentReport = null;
+  openKeys.clear();
   fileInput.value = "";
   show("upload");
 });

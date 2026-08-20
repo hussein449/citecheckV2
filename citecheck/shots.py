@@ -370,6 +370,13 @@ def capture_citing(
         doc.close()
 
 
+_ABSTRACT_BANNER = "INDEXED ABSTRACT - not a screenshot of the publisher page"
+_ABSTRACT_FOOTNOTE = (
+    "The publisher page could not be captured (bot check or paywall). This card "
+    "shows the abstract as held by the indexing service named above."
+)
+
+
 def render_abstract_card(
     out_dir: Path,
     stem: str,
@@ -378,14 +385,21 @@ def render_abstract_card(
     quote: str,
     source_label: str,
     url: str = "",
+    banner: str = _ABSTRACT_BANNER,
+    footnote: str = _ABSTRACT_FOOTNOTE,
 ) -> str:
-    """Render the indexed abstract as a labelled evidence card.
+    """Render retrieved text as a labelled evidence card.
 
     Some publishers (IEEE, SAGE, AIAA) serve a bot-check page instead of the
     article, so there is genuinely nothing to screenshot — and defeating those
     checks is off the table. The abstract itself was retrieved legitimately from
     Crossref/OpenAlex/Semantic Scholar, so it is rendered here instead, captioned
     as a record rather than a page capture so it can never be mistaken for one.
+
+    `banner` and `footnote` are overridable because the same card is what a
+    reader gets back when they re-check a reference against a document of their
+    own: the layout suits it exactly, but a caption claiming the text came from
+    an index would be a lie about where the evidence came from.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{stem}_evidence.png"
@@ -410,25 +424,21 @@ def render_abstract_card(
         return y + consumed + gap
 
     y = margin
-    banner = fitz.Rect(margin, y, width - margin, y + 44)
-    page.draw_rect(banner, color=None, fill=(0.96, 0.93, 0.82))
+    banner_box = fitz.Rect(margin, y, width - margin, y + 44)
+    page.draw_rect(banner_box, color=None, fill=(0.96, 0.93, 0.82))
     page.insert_textbox(
         fitz.Rect(margin + 12, y + 15, width - margin - 12, y + 42),
-        _ascii(f"INDEXED ABSTRACT - not a screenshot of the publisher page  |  via {source_label}"),
+        _ascii(f"{banner}  |  via {source_label}"),
         fontsize=9.5, fontname="hebo", color=(0.35, 0.28, 0.05),
     )
-    y = banner.y1 + 22
+    y = banner_box.y1 + 22
 
     y = block(title or "(untitled)", y, 15, "hebo", (0.06, 0.08, 0.12), 8)
     y = block(url, y, 8.5, "helv", (0.35, 0.4, 0.5), 18)
     y = block(abstract or "(no abstract available)", y, 11, "helv", (0.1, 0.12, 0.18), 20)
 
     page.draw_line(fitz.Point(margin, y), fitz.Point(width - margin, y), color=(0.85, 0.86, 0.9))
-    y = block(
-        "The publisher page could not be captured (bot check or paywall). This card "
-        "shows the abstract as held by the indexing service named above.",
-        y + 14, 8.5, "helv", (0.45, 0.45, 0.5), 0,
-    )
+    y = block(footnote, y + 14, 8.5, "helv", (0.45, 0.45, 0.5), 0)
 
     if quote:
         for probe in candidates_from("", quote)[:12]:

@@ -61,8 +61,38 @@ class Passage:
 
 
 @dataclass
+class Claim:
+    """One thing a citing paper asserts on the strength of one reference.
+
+    `text` is the clause the marker governs, which is often narrower than the
+    sentence it sits in. `context` carries that full sentence, because a clause
+    read alone can lose the subject it depends on — and `co_cited` says how many
+    references were cited together at that point, which is the difference
+    between "this source fails to support the claim" and "this source supplies
+    one of the six things the sentence lists".
+    """
+
+    text: str
+    context: str = ""
+    co_cited: int = 1
+    page: int | None = None
+
+
+def _as_claims(claims: "str | Claim | list") -> list[Claim]:
+    """Accept a bare string, a list of strings, or a list of Claims."""
+    if isinstance(claims, (str, Claim)):
+        claims = [claims]
+    out: list[Claim] = []
+    for item in claims or []:
+        claim = item if isinstance(item, Claim) else Claim(text=str(item))
+        if claim.text and claim.text.strip():
+            out.append(claim)
+    return out
+
+
+@dataclass
 class ClaimVerdict:
-    """One citing sentence, judged on its own merits."""
+    """One citing claim, judged on its own merits."""
 
     claim: str
     verdict: str = "unverified"
@@ -70,6 +100,12 @@ class ClaimVerdict:
     reason: str = ""
     evidence_quote: str = ""
     page: int | None = None
+    # The full sentence the claim was cut from, when it is narrower than that
+    # sentence — so the report can show a reader what was actually judged.
+    context: str = ""
+    # Set when a harsh verdict was re-checked against the cited work's own
+    # abstract and the second look disagreed. See `_second_look`.
+    reconsidered: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -243,9 +279,7 @@ def lexical_match(
     purely for being cited often.
     """
     result = MatchResult(engine="lexical")
-    if isinstance(claims, str):
-        claims = [claims]
-    tokenized = [(c, tokenize(c)) for c in claims if c and c.strip()]
+    tokenized = [(c, tokenize(c.text)) for c in _as_claims(claims)]
     tokenized = [(c, t) for c, t in tokenized if t]
     if not tokenized:
         result.reason = "The citing sentences carried no comparable content words."
@@ -266,7 +300,7 @@ def lexical_match(
 
     best_overall = -1.0
     best_rows: list[tuple[float, Passage, list[str]]] = []
-    best_claim = tokenized[0][0]
+    best_claim = tokenized[0][0].text
 
     for claim, claim_tokens in tokenized:
         scored: list[tuple[float, Passage, list[str]]] = []
@@ -283,17 +317,19 @@ def lexical_match(
         blended = 0.72 * top[0][0] + 0.28 * (sum(s for s, _, _ in top) / len(top))
         result.claim_verdicts.append(
             ClaimVerdict(
-                claim=claim,
+                claim=claim.text,
                 verdict=_verdict_from_score(blended),
                 score=round(blended, 3),
                 reason=f"Lexical overlap {blended:.2f} against the retrieved text.",
                 evidence_quote=top[0][1].text if top[0][0] > 0 else "",
+                page=claim.page,
+                context=claim.context if claim.context != claim.text else "",
             )
         )
         if blended > best_overall:
             best_overall = blended
             best_rows = top
-            best_claim = claim
+            best_claim = claim.text
 
     result.passages = [p for _, p, _ in best_rows]
     result.best_passage = best_rows[0][1]
@@ -368,14 +404,47 @@ _JUDGE_SCHEMA = {
     "additionalProperties": False,
 }
 
-def _judge_prompt(claim: str, reference_line: str, title: str, excerpt: str) -> str:
-    return (
-        f"# Claim made by the citing paper\n{claim.strip()}\n\n"
-        f"# Reference as printed in the bibliography\n"
-        f"{reference_line.strip() or '(not available)'}\n\n"
-        f"# Title of the retrieved source\n{title.strip() or '(unknown)'}\n\n"
-        f"# Text retrieved from the cited source\n{excerpt}"
+def _judge_prompt(
+    claim: Claim,
+    reference_line: str,
+    title: str,
+    abstract: str,
+    excerpt: str,
+) -> str:
+    blocks = [f"# Claim this reference is cited for\n{claim.text.strip()}"]
+
+    context = (claim.context or "").strip()
+    if context and context != claim.text.strip():
+        blocks.append(
+            "# The full sentence that claim was taken from\n"
+            f"{context}\n\n"
+            "Only the claim above is this reference's to support. The rest of the "
+            "sentence rests on the other references cited alongside it, and is "
+            "not evidence against this one."
+        )
+
+    if claim.co_cited > 1:
+        blocks.append(
+            f"# Note\nThis reference is one of {claim.co_cited} cited together at "
+            "this point. A group citation asks each source for part of what the "
+            "sentence says, not all of it."
+        )
+
+    blocks.append(
+        "# Reference as printed in the bibliography\n"
+        f"{reference_line.strip() or '(not available)'}"
     )
+    blocks.append(f"# Title of the retrieved source\n{title.strip() or '(unknown)'}")
+
+    # The abstract gets a heading of its own rather than being left to compete
+    # for attention inside a 24,000-character dump of body text. It is the one
+    # part of a source that states what the work is about in its own words, and
+    # it is what a human checking this citation would read first.
+    if (abstract or "").strip():
+        blocks.append(f"# Abstract of the cited source\n{abstract.strip()}")
+
+    blocks.append(f"# Text retrieved from the cited source\n{excerpt}")
+    return "\n\n".join(blocks)
 
 
 _JUDGE_SYSTEM = (
@@ -383,9 +452,18 @@ _JUDGE_SYSTEM = (
     "from the work it cites, decide whether the cited work actually supports the "
     "claim.\n\n"
     "Judge only from the source text provided. Do not use outside knowledge about "
-    "the paper. If the retrieved text is only an abstract or a stub, say so and "
-    "prefer 'unverified' over guessing. Quote evidence verbatim from the source "
-    "text so it can be located in the document; never paraphrase in that field."
+    "the paper. Read the abstract in full before deciding: it states what the work "
+    "is about more directly than its body does, and a source whose abstract covers "
+    "the claim's subject is not unrelated to it.\n\n"
+    "Be accurate about which verdict fits. 'unrelated' means the cited work is "
+    "about a different subject altogether — it is an accusation of miscitation, so "
+    "do not reach for it merely because the source does not state the claim in so "
+    "many words. A source on the same subject that does not assert the claim is "
+    "'related'. A source that touches the subject only in passing is 'weak'. If the "
+    "retrieved text is only an abstract or a stub and cannot settle the question, "
+    "say so and prefer 'unverified' over guessing.\n\n"
+    "Quote evidence verbatim from the source text so it can be located in the "
+    "document; never paraphrase in that field."
 )
 
 
@@ -419,10 +497,11 @@ def llm_available() -> bool:
 
 
 def openai_match(
-    claim: str,
+    claim: "str | Claim",
     source_text: str,
     title: str = "",
     reference_line: str = "",
+    abstract: str = "",
     model: str | None = None,
 ) -> MatchResult | None:
     """Ask the model to judge the citation. Returns None if the call is unusable.
@@ -435,12 +514,15 @@ def openai_match(
 
     import openai
 
+    claim = claim if isinstance(claim, Claim) else Claim(text=str(claim))
     excerpt = (source_text or "")[:24000]
-    if len(excerpt.strip()) < 120:
+    # The abstract is passed separately and in full, so a source with nothing
+    # but an abstract is still judgeable even when the fetched page was a stub.
+    if len(excerpt.strip()) < 120 and len((abstract or "").strip()) < 120:
         return None
 
     model = model or os.environ.get("CITECHECK_OPENAI_MODEL") or "gpt-4o"
-    prompt = _judge_prompt(claim, reference_line, title, excerpt)
+    prompt = _judge_prompt(claim, reference_line, title, abstract, excerpt)
 
     try:
         client = openai.OpenAI(base_url=os.environ.get("OPENAI_BASE_URL") or None)
@@ -498,8 +580,43 @@ def _result_from_payload(data: dict, engine: str) -> MatchResult:
     )
 
 
+# Verdicts that accuse the citing author of something, and so are not allowed
+# to stand on a single reading. See `_second_look`.
+_NEEDS_CONFIRMING = ("unrelated", "weak")
+
+
+def _second_look(
+    claim: Claim,
+    abstract: str,
+    source_text: str,
+    title: str,
+    reference_line: str,
+) -> MatchResult | None:
+    """Re-judge a harsh verdict against the cited work's own abstract.
+
+    "Unrelated" and "weak" are accusations: they say the author cited something
+    that does not say what they claimed. The commonest way to reach one wrongly
+    is to judge against retrieved text that buries or misses the abstract — a
+    publisher landing page, a bot-check stub, or forty pages of body text in
+    which the one relevant paragraph never rose to the top. The abstract is the
+    cited work stating its own subject and findings, so an accusation has to
+    survive a reading of that before it is reported.
+
+    Returns None when there is no second reading to be had: no abstract, or an
+    abstract that is already the whole of what was judged the first time.
+    """
+    abstract = (abstract or "").strip()
+    if len(abstract) < 120:
+        return None
+    if abstract == (source_text or "").strip():
+        return None
+    return openai_match(
+        claim, abstract, title=title, reference_line=reference_line, abstract=abstract
+    )
+
+
 def judge(
-    claims: str | list[str],
+    claims: "str | list[str] | list[Claim]",
     source_text: str,
     title: str = "",
     abstract: str = "",
@@ -524,28 +641,48 @@ def judge(
       overlap is not evidence of anything (see `_verdict_from_score`), so
       letting the weakest sentence set the headline would mean a heavily cited
       reference looks worse the more often it is cited — for no real reason.
+
+    Before a harsh model verdict is reported it gets a second reading against
+    the cited work's abstract; see `_second_look`.
     """
-    lexical = lexical_match(claims, source_text, title=title, abstract=abstract)
+    claim_list = _as_claims(claims)
+    lexical = lexical_match(claim_list, source_text, title=title, abstract=abstract)
 
     engine = active_engine() if use_model else "lexical"
-    if engine == "lexical":
-        return lexical
-
-    claim_list = [claims] if isinstance(claims, str) else [c for c in claims if c and c.strip()]
-    if not claim_list:
+    if engine == "lexical" or not claim_list:
         return lexical
 
     capped = claim_list[:max_claims]
 
-    judged: list[tuple[str, MatchResult]] = []
+    judged: list[tuple[Claim, MatchResult]] = []
     failure: MatchResult | None = None
+    reconsidered: set[int] = set()
     for claim in capped:
-        result = openai_match(claim, source_text, title=title, reference_line=reference_line)
+        result = openai_match(
+            claim, source_text, title=title, reference_line=reference_line,
+            abstract=abstract,
+        )
         if result is None:
             continue
         if "-" in result.engine:          # "<engine>-error" / "-refusal"
             failure = result
             continue
+
+        if result.verdict in _NEEDS_CONFIRMING:
+            again = _second_look(claim, abstract, source_text, title, reference_line)
+            if (
+                again is not None
+                and "-" not in again.engine
+                and _CONCERN.get(again.verdict, 0) < _CONCERN.get(result.verdict, 0)
+            ):
+                again.reason = (
+                    f"{again.reason} (First read of the retrieved page said "
+                    f"'{result.verdict}'; re-checked against the abstract, which "
+                    "covers the claim more directly.)"
+                )
+                result = again
+                reconsidered.add(len(judged))
+
         judged.append((claim, result))
 
     # Nothing usable came back: the lexical verdict stands, with the reason why.
@@ -556,13 +693,16 @@ def judge(
 
     per_claim = [
         ClaimVerdict(
-            claim=claim,
+            claim=claim.text,
             verdict=result.verdict,
             score=round(result.score, 3),
             reason=result.reason,
             evidence_quote=result.best_passage.text if result.best_passage else "",
+            page=claim.page,
+            context=claim.context if claim.context != claim.text else "",
+            reconsidered=index in reconsidered,
         )
-        for claim, result in judged
+        for index, (claim, result) in enumerate(judged)
     ]
 
     worst_claim, worst = max(judged, key=lambda row: _CONCERN.get(row[1].verdict, 0))
@@ -572,7 +712,7 @@ def judge(
         score=worst.score,
         reason=_rollup_reason(worst, per_claim, len(claim_list), len(capped)),
         claim_verdicts=per_claim,
-        matched_claim=worst_claim,
+        matched_claim=worst_claim.text,
     )
 
     # Keep the lexical passages — they carry the page offsets the screenshot
@@ -614,5 +754,11 @@ def _rollup_reason(
         base += (
             f" Only the first {judged_claims} of {total_claims} citing sentences "
             "were judged individually."
+        )
+    revisited = sum(1 for claim in per_claim if claim.reconsidered)
+    if revisited:
+        base += (
+            f" {revisited} verdict{'s were' if revisited != 1 else ' was'} softened "
+            "after re-reading the cited work's abstract."
         )
     return base

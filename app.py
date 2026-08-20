@@ -47,6 +47,9 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 # run_id -> {"queue": Queue, "events": [...], "done": bool, "report": dict|None}
 _RUNS: dict[str, dict] = {}
 _LOCK = threading.Lock()
+# Re-checks read report.json, replace one entry and write it back, so two of
+# them running at once would lose whichever finished first.
+_RECHECK_LOCK = threading.Lock()
 
 # Launching a browser takes a moment, so probe once at import and reuse.
 _SHOTS_OK, _SHOTS_DETAIL = shots.browser_status()
@@ -227,6 +230,66 @@ def stream(run_id: str):
 
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@app.post("/api/recheck/<run_id>")
+def recheck(run_id: str):
+    """Re-run one reference, optionally against a document the reader supplies.
+
+    Synchronous rather than streamed: this is one reference, it takes seconds
+    rather than minutes, and the caller has a single card to update. Streaming
+    it would mean a second event log for a job with one step in it.
+    """
+    if not _RUN_ID.fullmatch(run_id):
+        abort(404)
+    run_dir = RUNS_DIR / run_id
+    if not (run_dir / "report.json").exists():
+        abort(404)
+
+    key = (request.form.get("key") or "").strip()
+    if not key:
+        return jsonify({"error": "No reference was named."}), 400
+
+    supplied = None
+    uploaded = request.files.get("source")
+    if uploaded is not None and uploaded.filename:
+        try:
+            supplied = pipeline.read_supplied(uploaded.filename, uploaded.read())
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    options = pipeline.Options(
+        use_model=request.form.get("use_model", "1") != "0",
+        take_screenshots=request.form.get("screenshots", "1") != "0" and _SHOTS_OK,
+        max_claims_per_reference=_int_arg("max_claims", 6, 1, 20),
+    )
+
+    papers = sorted(UPLOADS_DIR.glob(f"{run_id}_*"))
+    try:
+        # Serialised: two re-checks of the same run both read report.json, both
+        # write it back, and the second one silently discards the first.
+        with _RECHECK_LOCK:
+            report_data = pipeline.recheck_one(
+                run_dir,
+                key,
+                options,
+                paper_path=str(papers[0]) if papers else "",
+                supplied=supplied,
+            )
+    except KeyError:
+        return jsonify({"error": f"Reference {key} is not in this report."}), 404
+    except Exception as exc:
+        app.logger.error("Recheck %s/%s failed:\n%s", run_id, key, traceback.format_exc())
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
+
+    # Keep the in-memory copy in step, so a later /api/report does not serve the
+    # pre-recheck report back over the one just written.
+    state = _RUNS.get(run_id)
+    if state is not None:
+        state["report"] = report_data
+
+    entry = next((e for e in report_data["references"] if e["key"] == key), None)
+    return jsonify({"report": report_data, "entry": entry})
 
 
 @app.get("/api/report/<run_id>")
