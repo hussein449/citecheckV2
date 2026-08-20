@@ -354,6 +354,67 @@ class SummariseTest(unittest.TestCase):
         self.assertFalse(any("ran out of time" in w for w in report["warnings"]))
 
 
+class ManualVerdictTest(unittest.TestCase):
+    """The tool screens; a person decides — and the report must say which."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.run_dir = Path(self._tmp.name)
+        pipeline.save(self.run_dir, _report_with_one_reference())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def set(self, **kwargs):
+        return pipeline.set_verdict(self.run_dir, "12", **kwargs)
+
+    def entry(self, report):
+        return report["references"][0]
+
+    def test_a_hand_set_verdict_replaces_the_headline(self):
+        entry = self.entry(self.set(verdict="supported", note="Read it; p.7 says so."))
+        self.assertEqual(entry["verdict"], "supported")
+        self.assertEqual(entry["reviewed"]["verdict"], "supported")
+        self.assertIn("Set by hand", entry["reason"])
+        self.assertIn("p.7", entry["reason"])
+
+    def test_what_the_tool_found_is_never_destroyed(self):
+        entry = self.entry(self.set(verdict="supported"))
+        self.assertEqual(entry["reviewed"]["machine_verdict"], "unrelated")
+        self.assertIn("login form", entry["reviewed"]["machine_reason"])
+
+    def test_marking_twice_does_not_rewrite_what_the_tool_found(self):
+        """Otherwise the reader's own first answer becomes 'what the tool said'."""
+        self.set(verdict="supported")
+        entry = self.entry(self.set(verdict="related"))
+        self.assertEqual(entry["verdict"], "related")
+        self.assertEqual(entry["reviewed"]["machine_verdict"], "unrelated")
+
+    def test_clearing_restores_the_tool_exactly(self):
+        before = self.entry(json.loads((self.run_dir / "report.json").read_text(encoding="utf-8")))
+        self.set(verdict="supported", note="a note")
+        entry = self.entry(self.set(clear=True))
+        self.assertEqual(entry["verdict"], before["verdict"])
+        self.assertEqual(entry["reason"], before["reason"])
+        self.assertNotIn("reviewed", entry)
+
+    def test_the_banner_admits_the_verdict_was_set_by_hand(self):
+        """A report reading 'clear' because someone marked it clear is a
+        different document, and the reader of the PDF was not in the room."""
+        report = self.set(verdict="supported")
+        headlines = " ".join(report["stats"]["risk"]["headlines"]).lower()
+        self.assertIn("set by hand", headlines)
+        self.assertEqual(report["stats"]["reviewed"], 1)
+
+    def test_an_invented_verdict_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.set(verdict="probably fine")
+
+    def test_an_unknown_reference_is_refused(self):
+        with self.assertRaises(KeyError):
+            pipeline.set_verdict(self.run_dir, "999", verdict="supported")
+
+
 class RecheckTest(unittest.TestCase):
     """Re-running one reference has to move the report, not just the card."""
 
@@ -414,6 +475,15 @@ class RecheckTest(unittest.TestCase):
                 self.run_dir, "999", self.options,
                 supplied=pipeline.SuppliedSource(name="x.txt", text="anything at all"),
             )
+
+    def test_a_recheck_drops_a_hand_set_verdict_and_says_so(self):
+        """It judged evidence this re-check just replaced."""
+        pipeline.set_verdict(self.run_dir, "12", verdict="supported", note="read it")
+        report = self.recheck("Consolidation centres cut last-mile emissions in dense cities.")
+        entry = report["references"][0]
+        self.assertNotIn("reviewed", entry)
+        self.assertEqual(entry["rechecked"]["cleared_review"], "supported")
+        self.assertEqual(report["stats"]["reviewed"], 0)
 
 
 if __name__ == "__main__":

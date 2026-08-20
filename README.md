@@ -199,13 +199,36 @@ checks that were already right.
   citation against *that*. Resolution and fetching are skipped outright: you
   have said which document this reference is, which is stronger evidence than
   any bibliographic search.
+- **Set this verdict myself** takes your own verdict from a dropdown. The tool
+  screens; you decide. Once you have opened the source and read it, your
+  judgement beats anything here.
 
 What the indices said — that the work exists, that it has or has not been
 retracted — is carried over untouched when you supply a file, because none of it
-was re-tested. Only the content verdict is replaced. The run's tally, screening
-banner and warnings are all recomputed from the entries, so a re-check that
-clears a finding clears it from the headline too, and the exported PDF records
-which verdicts came from a re-check.
+was re-tested. Only the content verdict is replaced.
+
+### A hand-set verdict is always labelled as one
+
+These reports get handed to other people, so a verdict you set yourself must
+never be readable as something the tool established. It is marked **Your
+verdict** on the card, the reason line says it was set by hand and which verdict
+it replaced, and the screening banner says so too — *even when the result is
+`clear`*, because a report that reads clean because someone marked it clean is a
+different document, and whoever receives the PDF was not in the room when that
+call was made.
+
+What the tool found is never destroyed, only displaced: `machine_verdict` and
+`machine_reason` keep the original, the card shows both side by side, and
+**Use the tool's verdict again** restores it exactly.
+
+Re-checking a reference *clears* a hand-set verdict on it, and says so. Your
+verdict was a reading of evidence the re-check has just replaced, and carrying
+it forward would attach your name to a reading of something you never saw.
+
+The run's tally, screening banner and warnings are all recomputed from the
+entries, so a re-check or a hand-set verdict that clears a finding clears it
+from the headline too — and the exported PDF records which verdicts came from a
+re-check and which from you.
 
 ## Judging engine
 

@@ -167,6 +167,7 @@ function refreshResults() {
     `${s.references_checked ?? 0} of ${s.references_cited ?? 0} cited references checked`,
     s.claims_judged ? `${s.claims_judged} individual claims judged` : null,
     s.rechecked ? `${s.rechecked} re-checked by hand` : null,
+    s.reviewed ? `${s.reviewed} verdict${s.reviewed === 1 ? "" : "s"} set by you` : null,
     engineSummary(s),
     `${s.elapsed_seconds ?? "?"}s`,
   ].filter(Boolean).join(" · ");
@@ -285,6 +286,17 @@ function renderCards() {
   $("cards").querySelectorAll(".recheck-run").forEach((btn) => {
     btn.addEventListener("click", () => runRecheck(btn.closest(".recheck").dataset.key, null));
   });
+  $("cards").querySelectorAll(".review-save").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const box = btn.closest(".recheck");
+      setVerdict(box.dataset.key, { verdict: box.querySelector(".review-pick").value });
+    });
+  });
+  $("cards").querySelectorAll(".review-clear").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setVerdict(btn.closest(".recheck").dataset.key, { clear: "1" });
+    });
+  });
   $("cards").querySelectorAll(".recheck input[type=file]").forEach((input) => {
     input.addEventListener("change", () => {
       const file = input.files?.[0];
@@ -339,6 +351,36 @@ async function runRecheck(key, file) {
   }
 }
 
+/* Unlike a re-check this is instant — no network fetch, no model call — so it
+   needs no busy state, just the report coming back changed. */
+async function setVerdict(key, fields) {
+  const box = document.querySelector(`.recheck[data-key="${key}"]`);
+  const note = box?.querySelector(".recheck-status");
+
+  const body = new FormData();
+  body.append("key", key);
+  Object.entries(fields).forEach(([name, value]) => body.append(name, value));
+
+  try {
+    const res = await fetch(`/api/verdict/${currentRun}`, { method: "POST", body });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Could not save that (${res.status})`);
+
+    currentReport = data.report;
+    openKeys.add(key);
+    refreshResults();
+
+    const after = document.querySelector(`.recheck[data-key="${key}"]`);
+    setNote(after?.querySelector(".recheck-status"), "status done",
+      fields.clear
+        ? `Back to the tool's verdict — ${VERDICT_LABEL[data.entry.verdict] || data.entry.verdict}.`
+        : `Recorded as your verdict: ${VERDICT_LABEL[data.entry.verdict] || data.entry.verdict}.`);
+    after?.scrollIntoView({ block: "center", behavior: "smooth" });
+  } catch (err) {
+    setNote(note, "status error", err.message);
+  }
+}
+
 function setNote(note, className, text) {
   if (!note) return;
   note.hidden = false;
@@ -354,12 +396,18 @@ function reportRecheck(key, entry) {
   if (!box || !entry) return;
   const was = entry.rechecked?.previous_verdict;
   const now = VERDICT_LABEL[entry.verdict] || entry.verdict;
+  /* Their own verdict was a reading of evidence this re-check has just
+     replaced, so it was dropped. Losing someone's conclusion silently is worse
+     than losing it. */
+  const dropped = entry.rechecked?.cleared_review
+    ? ` Your own verdict was cleared — it judged the evidence this replaced.`
+    : "";
   setNote(
     box.querySelector(".recheck-status"),
     "status done",
-    was && was !== entry.verdict
+    (was && was !== entry.verdict
       ? `Re-checked: ${VERDICT_LABEL[was] || was} → ${now}.`
-      : `Re-checked — the verdict is still ${now}.`
+      : `Re-checked — the verdict is still ${now}.`) + dropped
   );
   box.scrollIntoView({ block: "center", behavior: "smooth" });
 }
@@ -378,6 +426,7 @@ function cardHtml(entry) {
     !src.retracted && flags.some((f) => f.severity === "high")
       ? `<span class="chip flagged">Flagged</span>` : "",
     entry.rechecked ? `<span class="chip rechecked">Re-checked</span>` : "",
+    entry.reviewed ? `<span class="chip reviewed">Your verdict</span>` : "",
   ].join("");
 
   /* Evidence images are written back to the same filenames on a re-check, so
@@ -474,6 +523,9 @@ function cardHtml(entry) {
     <div class="card-body">
       <div class="section"><h4>Verdict</h4>
         <p class="reason">${esc(entry.reason || "No explanation available.")}</p>
+        ${entry.reviewed ? `<p class="reason machine-said"><span>What the tool found:</span>
+           ${esc(VERDICT_LABEL[entry.reviewed.machine_verdict] || entry.reviewed.machine_verdict || "—")}
+           — ${esc(truncate(entry.reviewed.machine_reason || "", 400))}</p>` : ""}
       </div>
       ${recheckHtml(entry)}
       ${flagsHtml}
@@ -509,8 +561,39 @@ function recheckHtml(entry) {
         </label>
         <span class="recheck-hint">PDF or .txt</span>
       </div>
+      ${reviewHtml(entry)}
       ${done}
       <p class="recheck-status" hidden></p>
+    </div>`;
+}
+
+/* Setting the verdict yourself. Sits with the other two actions because it is
+   the same decision — "the tool got this wrong" — just answered from your own
+   reading rather than by asking the tool to look again. */
+function reviewHtml(entry) {
+  const review = entry.reviewed;
+  const chosen = review?.verdict || entry.verdict;
+  const options = VERDICTS.map(
+    (v) => `<option value="${v}"${v === chosen ? " selected" : ""}>${esc(VERDICT_LABEL[v])}</option>`
+  ).join("");
+
+  const standing = review
+    ? `<p class="review-was">You set this to <b>${esc(VERDICT_LABEL[review.verdict] || review.verdict)}</b>
+         on ${esc(review.at || "")}. The tool had it as
+         <b>${esc(VERDICT_LABEL[review.machine_verdict] || review.machine_verdict || "—")}</b>.
+         ${review.note ? `<span class="review-note">“${esc(review.note)}”</span>` : ""}</p>`
+    : "";
+
+  return `
+    <div class="review">
+      <div class="recheck-actions">
+        <select class="review-pick" aria-label="Your verdict for this reference">${options}</select>
+        <button type="button" class="btn ghost review-save">Set this verdict myself</button>
+        ${review ? `<button type="button" class="btn ghost review-clear">Use the tool's verdict again</button>` : ""}
+      </div>
+      <p class="review-hint">Recorded as yours, not the tool's — on the card, in the
+        tally and in the exported PDF.</p>
+      ${standing}
     </div>`;
 }
 

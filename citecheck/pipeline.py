@@ -314,7 +314,7 @@ def summarise(report: dict) -> dict:
 
     verdicts: dict[str, int] = {}
     derived: list[str] = []
-    flagged = retracted = not_found = claims_judged = rechecked = 0
+    flagged = retracted = not_found = claims_judged = rechecked = reviewed = 0
 
     for entry in references:
         verdicts[entry["verdict"]] = verdicts.get(entry["verdict"], 0) + 1
@@ -325,6 +325,8 @@ def summarise(report: dict) -> dict:
             not_found += 1
         if entry.get("rechecked"):
             rechecked += 1
+        if entry.get("reviewed"):
+            reviewed += 1
         if entry.get("timed_out") and entry.get("notes"):
             derived.append(f"[{entry['key']}] {entry['notes'][0]}")
         for flag in entry.get("flags", []):
@@ -339,6 +341,7 @@ def summarise(report: dict) -> dict:
     stats["not_found"] = not_found
     stats["claims_judged"] = claims_judged
     stats["rechecked"] = rechecked
+    stats["reviewed"] = reviewed
     stats.update(_engine_outcome(references, stats, derived))
     stats["risk"] = risk_summary(stats)
 
@@ -478,6 +481,18 @@ def risk_summary(stats: dict) -> dict:
 
     if not headlines:
         headlines.append("No integrity problems were found in the references checked")
+
+    # Said last, and said whatever the outcome. The banner is the one line a
+    # reader acts on, and a report that reads "clear" because someone marked
+    # three references clear by hand is a different document from one that
+    # reads clear on its own findings. The reader of an exported PDF was not
+    # in the room when that call was made and has no other way to know.
+    reviewed = stats.get("reviewed", 0)
+    if reviewed:
+        headlines.append(
+            f"{reviewed} verdict{'s were' if reviewed != 1 else ' was'} set by hand "
+            "after review, not by the tool"
+        )
 
     return {"level": level, "headlines": headlines}
 
@@ -796,6 +811,83 @@ def _apply_verdict(entry: dict, verdict: match.MatchResult) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Setting a verdict by hand
+# --------------------------------------------------------------------------- #
+
+def set_verdict(
+    run_dir: Path,
+    key: str,
+    verdict: str = "",
+    note: str = "",
+    clear: bool = False,
+) -> dict:
+    """Record the reader's own verdict on one reference, or drop it again.
+
+    The tool screens; a person decides. Once someone has opened the source and
+    read it, their judgement is better evidence than anything here — and until
+    they can record it, the report stays wrong in a way they cannot fix and
+    cannot hand on.
+
+    What the tool said is never overwritten, only displaced. `machine_verdict`
+    and `machine_reason` keep the original so the report can always show both,
+    and clearing the review restores them exactly. A reader who marks a
+    reference twice does not turn their own first answer into "what the tool
+    found": the machine verdict is carried across from the existing review
+    rather than re-read from the displaced field.
+    """
+    run_dir = Path(run_dir)
+    report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+
+    entry = next(
+        (e for e in report.get("references") or [] if e.get("key") == key), None
+    )
+    if entry is None:
+        raise KeyError(f"No reference {key!r} in this report.")
+
+    existing = entry.get("reviewed") or {}
+
+    if clear:
+        if existing:
+            entry["verdict"] = existing.get("machine_verdict", entry["verdict"])
+            entry["reason"] = existing.get("machine_reason", entry.get("reason", ""))
+            entry.pop("reviewed", None)
+    else:
+        if verdict not in match.VERDICTS:
+            raise ValueError(
+                f"{verdict!r} is not a verdict. Use one of: "
+                + ", ".join(match.VERDICTS)
+            )
+        entry["reviewed"] = {
+            "verdict": verdict,
+            "note": (note or "").strip()[:2000],
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "machine_verdict": existing.get("machine_verdict", entry["verdict"]),
+            "machine_reason": existing.get("machine_reason", entry.get("reason", "")),
+        }
+        entry["verdict"] = verdict
+        entry["reason"] = _review_reason(entry["reviewed"])
+
+    summarise(report)
+    save(run_dir, report)
+    return report
+
+
+def _review_reason(review: dict) -> str:
+    """The headline reason for a reference someone has judged themselves.
+
+    Says who decided before it says what was decided. This string is what the
+    card subtitle and the exported PDF show, and a reader must never be able to
+    read a hand-set verdict as something the tool established.
+    """
+    note = (review.get("note") or "").strip()
+    was = review.get("machine_verdict", "")
+    base = "Set by hand after review"
+    if was and was != review.get("verdict"):
+        base += f", replacing the tool's verdict of “{was}”"
+    return f"{base}. {note}" if note else f"{base}."
+
+
+# --------------------------------------------------------------------------- #
 # Re-checking one reference
 # --------------------------------------------------------------------------- #
 
@@ -913,11 +1005,19 @@ def recheck_one(
         if options.take_screenshots:
             shots.close_thread_browser()
 
+    # A hand-set verdict was a judgement about evidence that has just been
+    # replaced. Carrying it forward would attach the reader's name to a reading
+    # of something they never saw, so it is dropped — and said out loud, because
+    # silently discarding someone's own conclusion is worse than losing it.
+    displaced = (previous.get("reviewed") or {}).get("verdict", "")
+    entry.pop("reviewed", None)
+
     entry["rechecked"] = {
         "at": datetime.now().isoformat(timespec="seconds"),
         "against": "supplied" if supplied is not None else "sources",
         "filename": supplied.name if supplied is not None else "",
         "previous_verdict": previous.get("verdict", ""),
+        "cleared_review": displaced,
     }
     # A verdict that has been re-run is no longer a casualty of the run's clock.
     entry.pop("timed_out", None)

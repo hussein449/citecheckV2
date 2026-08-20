@@ -423,6 +423,29 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 .recheck-pick { margin: 0; cursor: pointer; }
 .recheck-hint { font-size: 11.5px; color: var(--ink-dim); }
 .recheck-was { margin: 10px 0 0; font-size: 11.8px; color: var(--ink-dim); }
+
+/* Setting the verdict yourself. Separated from the two automated actions by a
+   rule, because it is a different kind of act: those two ask the tool to look
+   again, this one overrules it. */
+.review { margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--line); }
+.review-pick {
+  padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line-strong);
+  background: var(--surface); color: var(--ink-2); font: inherit; font-size: 13.3px;
+  cursor: pointer;
+}
+.review-hint { margin: 8px 0 0; font-size: 11.5px; color: var(--ink-dim); }
+.review-was { margin: 9px 0 0; font-size: 12.2px; color: var(--ink-2); }
+.review-note { display: block; margin-top: 3px; color: var(--ink-dim); font-style: italic; }
+.chip.reviewed { background: var(--accent-soft); color: var(--accent); }
+/* What the tool found, kept visible under a verdict someone has overruled —
+   the disagreement is the interesting part, and hiding it would make a
+   hand-set verdict indistinguishable from a machine one. */
+.machine-said {
+  margin-top: 9px; padding: 9px 12px; border-radius: 8px;
+  background: var(--surface-2); border: 1px solid var(--line);
+  font-size: 12.8px; color: var(--ink-dim);
+}
+.machine-said span { font-weight: 600; color: var(--ink-2); }
 .recheck-status { margin: 10px 0 0; font-size: 12.6px; }
 .recheck-status.working { color: var(--ink-dim); }
 .recheck-status.done { color: var(--ok); font-weight: 550; }
@@ -521,12 +544,18 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
      offering buttons nobody can press. What it *did* is kept: `.recheck-was`
      records that a verdict came from a re-check, which the reader of an
      exported PDF has every right to know. */
+  /* `.recheck` is a control panel, not a finding — on paper it is a dashed box
+     offering buttons nobody can press. What it *did* is kept: `.recheck-was`
+     and `.review-was` record that a verdict came from a re-check or from the
+     reader's own reading, which whoever receives this PDF has every right to
+     know. */
   .topbar, .foot, .filters, .results-actions, .recheck-actions,
-  .recheck > .status, .recheck-status,
+  .recheck > .status, .recheck-status, .review-hint,
   .lightbox, #panel-upload, #panel-progress, .chev { display: none !important; }
   .recheck { border: 0; padding: 0; background: none; }
-  .recheck:not(:has(.recheck-was)) { display: none !important; }
+  .recheck:not(:has(.recheck-was, .review-was)) { display: none !important; }
   .recheck > h4 { display: none; }
+  .review { border-top: 0; margin-top: 0; padding-top: 0; }
 
   /* On screen the panels are cards floating on grey; on paper they are just
      the page, and the borders only add clutter. */

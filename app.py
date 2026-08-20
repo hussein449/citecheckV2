@@ -292,6 +292,47 @@ def recheck(run_id: str):
     return jsonify({"report": report_data, "entry": entry})
 
 
+@app.post("/api/verdict/<run_id>")
+def verdict(run_id: str):
+    """Record the reader's own verdict on one reference, or drop it again.
+
+    The tool screens; a person decides. Once someone has opened the source and
+    read it, their judgement beats anything here — and the report has to be able
+    to carry that, clearly labelled as theirs.
+    """
+    if not _RUN_ID.fullmatch(run_id):
+        abort(404)
+    run_dir = RUNS_DIR / run_id
+    if not (run_dir / "report.json").exists():
+        abort(404)
+
+    key = (request.form.get("key") or "").strip()
+    if not key:
+        return jsonify({"error": "No reference was named."}), 400
+
+    clear = request.form.get("clear") == "1"
+    try:
+        with _RECHECK_LOCK:
+            report_data = pipeline.set_verdict(
+                run_dir,
+                key,
+                verdict=(request.form.get("verdict") or "").strip(),
+                note=request.form.get("note") or "",
+                clear=clear,
+            )
+    except KeyError:
+        return jsonify({"error": f"Reference {key} is not in this report."}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    state = _RUNS.get(run_id)
+    if state is not None:
+        state["report"] = report_data
+
+    entry = next((e for e in report_data["references"] if e["key"] == key), None)
+    return jsonify({"report": report_data, "entry": entry})
+
+
 @app.get("/api/report/<run_id>")
 def report(run_id: str):
     state = _RUNS.get(run_id)
