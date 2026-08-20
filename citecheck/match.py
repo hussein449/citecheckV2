@@ -50,6 +50,29 @@ _CONCERN = {
 }
 
 
+def most_concerning(verdicts) -> str:
+    """The verdict among *verdicts* that most demands a human look."""
+    return max(verdicts, key=lambda v: _CONCERN.get(v, 0), default="unverified")
+
+
+def roll_up(verdicts, engine: str) -> str:
+    """One headline from several per-claim verdicts, the way *engine* would.
+
+    Exposed because a reference whose claims a reader has edited must re-derive
+    its headline exactly as the engine that produced them would have — and the
+    two tiers roll up in opposite directions (see `judge`). Applying the model's
+    worst-case rule to a lexically judged reference would mean improving one
+    claim makes the card look *worse*, which is indefensible in front of the
+    person who just did the improving.
+    """
+    verdicts = list(verdicts)
+    if not verdicts:
+        return "unverified"
+    if engine and engine != "lexical":
+        return most_concerning(verdicts)
+    return min(verdicts, key=lambda v: _CONCERN.get(v, 0))
+
+
 @dataclass
 class Passage:
     text: str

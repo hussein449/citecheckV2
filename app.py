@@ -310,7 +310,14 @@ def verdict(run_id: str):
     if not key:
         return jsonify({"error": "No reference was named."}), 400
 
-    clear = request.form.get("clear") == "1"
+    # Absent means "the reference's own headline"; a number picks one of the
+    # citations judged inside it.
+    raw_index = (request.form.get("claim_index") or "").strip()
+    try:
+        claim_index = int(raw_index) if raw_index else None
+    except ValueError:
+        return jsonify({"error": f"{raw_index!r} is not a citation number."}), 400
+
     try:
         with _RECHECK_LOCK:
             report_data = pipeline.set_verdict(
@@ -318,7 +325,8 @@ def verdict(run_id: str):
                 key,
                 verdict=(request.form.get("verdict") or "").strip(),
                 note=request.form.get("note") or "",
-                clear=clear,
+                clear=request.form.get("clear") == "1",
+                claim_index=claim_index,
             )
     except KeyError:
         return jsonify({"error": f"Reference {key} is not in this report."}), 404

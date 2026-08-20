@@ -315,6 +315,7 @@ def summarise(report: dict) -> dict:
     verdicts: dict[str, int] = {}
     derived: list[str] = []
     flagged = retracted = not_found = claims_judged = rechecked = reviewed = 0
+    claims_reviewed = 0
 
     for entry in references:
         verdicts[entry["verdict"]] = verdicts.get(entry["verdict"], 0) + 1
@@ -327,6 +328,9 @@ def summarise(report: dict) -> dict:
             rechecked += 1
         if entry.get("reviewed"):
             reviewed += 1
+        claims_reviewed += sum(
+            1 for c in entry.get("claim_verdicts") or [] if c.get("override")
+        )
         if entry.get("timed_out") and entry.get("notes"):
             derived.append(f"[{entry['key']}] {entry['notes'][0]}")
         for flag in entry.get("flags", []):
@@ -342,6 +346,7 @@ def summarise(report: dict) -> dict:
     stats["claims_judged"] = claims_judged
     stats["rechecked"] = rechecked
     stats["reviewed"] = reviewed
+    stats["claims_reviewed"] = claims_reviewed
     stats.update(_engine_outcome(references, stats, derived))
     stats["risk"] = risk_summary(stats)
 
@@ -820,20 +825,26 @@ def set_verdict(
     verdict: str = "",
     note: str = "",
     clear: bool = False,
+    claim_index: int | None = None,
 ) -> dict:
-    """Record the reader's own verdict on one reference, or drop it again.
+    """Record the reader's own verdict, or drop it again.
 
     The tool screens; a person decides. Once someone has opened the source and
     read it, their judgement is better evidence than anything here — and until
     they can record it, the report stays wrong in a way they cannot fix and
     cannot hand on.
 
-    What the tool said is never overwritten, only displaced. `machine_verdict`
-    and `machine_reason` keep the original so the report can always show both,
-    and clearing the review restores them exactly. A reader who marks a
-    reference twice does not turn their own first answer into "what the tool
-    found": the machine verdict is carried across from the existing review
-    rather than re-read from the displaced field.
+    `claim_index` picks *which* verdict. A reference cited five times carries
+    five separate judgements, and a reader who has just read the source usually
+    disagrees with one of them, not with all five — so each citation can be set
+    on its own, and the reference's headline is then re-derived from the claims
+    beneath it. Omit it to set the reference's headline directly, which
+    overrules the claims rather than summarising them.
+
+    What the tool said is never overwritten, only displaced: `machine` keeps the
+    original headline and every claim keeps its own, so clearing restores them
+    exactly and a reader who marks the same thing twice never turns their own
+    first answer into "what the tool found".
     """
     run_dir = Path(run_dir)
     report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
@@ -844,46 +855,142 @@ def set_verdict(
     if entry is None:
         raise KeyError(f"No reference {key!r} in this report.")
 
-    existing = entry.get("reviewed") or {}
+    if not clear and verdict not in match.VERDICTS:
+        raise ValueError(
+            f"{verdict!r} is not a verdict. Use one of: " + ", ".join(match.VERDICTS)
+        )
 
-    if clear:
-        if existing:
-            entry["verdict"] = existing.get("machine_verdict", entry["verdict"])
-            entry["reason"] = existing.get("machine_reason", entry.get("reason", ""))
-            entry.pop("reviewed", None)
+    _baseline(entry)
+
+    if claim_index is None:
+        if clear:
+            entry.pop("override", None)
+        else:
+            entry["override"] = _stamp(verdict, note)
     else:
-        if verdict not in match.VERDICTS:
-            raise ValueError(
-                f"{verdict!r} is not a verdict. Use one of: "
-                + ", ".join(match.VERDICTS)
+        claims = entry.get("claim_verdicts") or []
+        if not 0 <= claim_index < len(claims):
+            raise KeyError(
+                f"Reference {key} has no citation {claim_index + 1}; it has {len(claims)}."
             )
-        entry["reviewed"] = {
-            "verdict": verdict,
-            "note": (note or "").strip()[:2000],
-            "at": datetime.now().isoformat(timespec="seconds"),
-            "machine_verdict": existing.get("machine_verdict", entry["verdict"]),
-            "machine_reason": existing.get("machine_reason", entry.get("reason", "")),
-        }
-        entry["verdict"] = verdict
-        entry["reason"] = _review_reason(entry["reviewed"])
+        claim = claims[claim_index]
+        claim.setdefault("machine_verdict", claim.get("verdict", ""))
+        claim.setdefault("machine_reason", claim.get("reason", ""))
+        if clear:
+            claim.pop("override", None)
+            claim["verdict"] = claim["machine_verdict"]
+            claim["reason"] = claim["machine_reason"]
+        else:
+            claim["override"] = _stamp(verdict, note)
+            claim["verdict"] = verdict
+            claim["reason"] = _review_reason(verdict, claim["machine_verdict"], note)
 
+    _settle_headline(entry)
     summarise(report)
     save(run_dir, report)
     return report
 
 
-def _review_reason(review: dict) -> str:
-    """The headline reason for a reference someone has judged themselves.
+def _stamp(verdict: str, note: str) -> dict:
+    return {
+        "verdict": verdict,
+        "note": (note or "").strip()[:2000],
+        "at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _baseline(entry: dict) -> dict:
+    """What the tool itself concluded, before anyone overruled it.
+
+    Captured lazily, the first time a reference is touched, and never written
+    again — so displacing a verdict twice cannot promote the reader's own first
+    answer into the record of what the tool found.
+    """
+    if "machine" not in entry:
+        # Reports written before per-claim review nested this inside `reviewed`.
+        legacy = entry.get("reviewed") or {}
+        entry["machine"] = {
+            "verdict": legacy.get("machine_verdict", entry.get("verdict", "")),
+            "reason": legacy.get("machine_reason", entry.get("reason", "")),
+        }
+    return entry["machine"]
+
+
+def _settle_headline(entry: dict) -> None:
+    """Re-derive a reference's headline verdict from whatever now stands.
+
+    Three cases, in order of precedence:
+
+    * a headline the reader set directly, which overrules everything below it;
+    * otherwise, if they have judged any individual citation, a roll-up of the
+      claim verdicts — because a card that disagrees with the claims listed
+      inside it is worse than no headline at all. It rolls up the way the engine
+      that produced those claims would have, which is not the same in both
+      directions: see `match.roll_up`;
+    * otherwise the tool's own verdict, restored exactly.
+    """
+    machine = _baseline(entry)
+    claims = entry.get("claim_verdicts") or []
+    entry["claim_tally"] = _tally(claims)
+
+    override = entry.get("override")
+    if override:
+        entry["verdict"] = override["verdict"]
+        entry["reason"] = _review_reason(
+            override["verdict"], machine["verdict"], override.get("note", "")
+        )
+        entry["reviewed"] = {
+            **override,
+            "source": "reference",
+            "machine_verdict": machine["verdict"],
+            "machine_reason": machine["reason"],
+        }
+        return
+
+    edited = [c for c in claims if c.get("override")]
+    if edited:
+        rolled = match.roll_up([c["verdict"] for c in claims], entry.get("engine", ""))
+        entry["verdict"] = rolled
+        entry["reason"] = (
+            f"You judged {len(edited)} of {len(claims)} citing "
+            f"{'places' if len(claims) != 1 else 'place'} yourself; rolled up across "
+            f"all {len(claims)}, this reference now reads “{rolled}”. The tool had it "
+            f"as “{machine['verdict']}”."
+        )
+        entry["reviewed"] = {
+            "verdict": rolled,
+            "note": "",
+            "at": max(c["override"]["at"] for c in edited),
+            "source": "claims",
+            "edited_claims": len(edited),
+            "machine_verdict": machine["verdict"],
+            "machine_reason": machine["reason"],
+        }
+        return
+
+    entry["verdict"] = machine["verdict"]
+    entry["reason"] = machine["reason"]
+    entry.pop("reviewed", None)
+
+
+def _tally(claims: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for claim in claims:
+        counts[claim["verdict"]] = counts.get(claim["verdict"], 0) + 1
+    return counts
+
+
+def _review_reason(verdict: str, machine_verdict: str, note: str = "") -> str:
+    """The reason line for something someone judged themselves.
 
     Says who decided before it says what was decided. This string is what the
-    card subtitle and the exported PDF show, and a reader must never be able to
-    read a hand-set verdict as something the tool established.
+    card and the exported PDF show, and a reader must never be able to read a
+    hand-set verdict as something the tool established.
     """
-    note = (review.get("note") or "").strip()
-    was = review.get("machine_verdict", "")
     base = "Set by hand after review"
-    if was and was != review.get("verdict"):
-        base += f", replacing the tool's verdict of “{was}”"
+    if machine_verdict and machine_verdict != verdict:
+        base += f", replacing the tool's verdict of “{machine_verdict}”"
+    note = (note or "").strip()
     return f"{base}. {note}" if note else f"{base}."
 
 
@@ -1010,7 +1117,8 @@ def recheck_one(
     # of something they never saw, so it is dropped — and said out loud, because
     # silently discarding someone's own conclusion is worse than losing it.
     displaced = (previous.get("reviewed") or {}).get("verdict", "")
-    entry.pop("reviewed", None)
+    for stale in ("reviewed", "override", "machine"):
+        entry.pop(stale, None)
 
     entry["rechecked"] = {
         "at": datetime.now().isoformat(timespec="seconds"),

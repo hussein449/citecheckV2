@@ -406,6 +406,30 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 .claim-context {
   margin: 0 0 6px; font-size: 12.4px; color: var(--ink-dim); line-height: 1.5;
 }
+/* Per-citation controls. Quiet by default and only fully legible on hover or
+   focus: five of these down a card would otherwise shout louder than the
+   verdicts they exist to correct. Keyboard focus counts, so they are never
+   unreachable without a mouse. */
+.claim-actions {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--line);
+  opacity: .55; transition: opacity .12s ease;
+}
+.claim:hover .claim-actions,
+.claim-actions:focus-within { opacity: 1; }
+.claim-pick {
+  padding: 4px 7px; border-radius: 6px; border: 1px solid var(--line-strong);
+  background: var(--surface); color: var(--ink-2); font: inherit; font-size: 12px;
+  cursor: pointer;
+}
+.btn.tiny { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
+.claim.mine { border-left-width: 5px; background: var(--accent-soft); }
+.revisited.yours { color: var(--accent); background: #fff; }
+.claim-machine {
+  margin: 7px 0 0; padding: 7px 10px; border-radius: 6px; font-size: 12.2px;
+  background: var(--surface); border: 1px solid var(--line); color: var(--ink-dim);
+}
+.claim-machine span { font-weight: 600; color: var(--ink-2); }
 .claim-context span { font-weight: 600; color: var(--ink-2); }
 .revisited {
   font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
@@ -549,9 +573,12 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
      and `.review-was` record that a verdict came from a re-check or from the
      reader's own reading, which whoever receives this PDF has every right to
      know. */
-  .topbar, .foot, .filters, .results-actions, .recheck-actions,
+  .topbar, .foot, .filters, .results-actions, .recheck-actions, .claim-actions,
   .recheck > .status, .recheck-status, .review-hint,
   .lightbox, #panel-upload, #panel-progress, .chev { display: none !important; }
+  /* A citation the reader judged themselves keeps its marking on paper — the
+     reason line and "the tool said" block both print. */
+  .claim.mine { border-left-width: 5px; }
   .recheck { border: 0; padding: 0; background: none; }
   .recheck:not(:has(.recheck-was, .review-was)) { display: none !important; }
   .recheck > h4 { display: none; }

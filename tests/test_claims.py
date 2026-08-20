@@ -415,6 +415,119 @@ class ManualVerdictTest(unittest.TestCase):
             pipeline.set_verdict(self.run_dir, "999", verdict="supported")
 
 
+def _report_with_three_claims() -> dict:
+    report = _report_with_one_reference()
+    entry = report["references"][0]
+    entry["verdict"] = "weak"
+    entry["reason"] = "Judged separately for each of the 3 places this reference is cited."
+    entry["claim_verdicts"] = [
+        {"claim": "Consolidation centres cut emissions [12]", "verdict": "supported",
+         "reason": "The abstract reports a 28% reduction.", "page": 4},
+        {"claim": "and cut delivery times [12]", "verdict": "weak",
+         "reason": "Delivery time is not discussed.", "page": 5},
+        {"claim": "and are cheaper to run [12]", "verdict": "related",
+         "reason": "Costs are mentioned but not compared.", "page": 6},
+    ]
+    return report
+
+
+class PerClaimVerdictTest(unittest.TestCase):
+    """A reference cited five times carries five judgements, editable one by one."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.run_dir = Path(self._tmp.name)
+        pipeline.save(self.run_dir, _report_with_three_claims())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def set(self, **kwargs):
+        return pipeline.set_verdict(self.run_dir, "12", **kwargs)["references"][0]
+
+    def test_one_citation_can_be_set_without_touching_the_others(self):
+        entry = self.set(claim_index=1, verdict="supported", note="p.7 says it plainly")
+        claims = entry["claim_verdicts"]
+        self.assertEqual(claims[1]["verdict"], "supported")
+        self.assertIn("p.7", claims[1]["reason"])
+        self.assertEqual(claims[0]["verdict"], "supported")
+        self.assertEqual(claims[2]["verdict"], "related")
+        self.assertNotIn("override", claims[0])
+
+    def test_the_card_headline_follows_the_citations(self):
+        """The card must never disagree with the claims listed inside it."""
+        entry = self.set(claim_index=1, verdict="supported")
+        # weak is gone; the most concerning left is "related".
+        self.assertEqual(entry["verdict"], "related")
+        self.assertEqual(entry["reviewed"]["source"], "claims")
+        self.assertEqual(entry["reviewed"]["edited_claims"], 1)
+        self.assertEqual(entry["claim_tally"], {"supported": 2, "related": 1})
+
+    def test_the_headline_can_get_worse_too(self):
+        entry = self.set(claim_index=0, verdict="unrelated")
+        self.assertEqual(entry["verdict"], "unrelated")
+
+    def test_a_lexical_reference_rolls_up_the_way_it_always_did(self):
+        """Improving one claim must never make the card look worse.
+
+        The two tiers roll up in opposite directions on purpose: the model takes
+        the worst claim, lexical takes the best, because low word overlap is not
+        evidence of anything. Applying the model's rule to a lexical reference
+        means an edit that improves a claim drops the headline to the weakest
+        one — in front of the person who just did the improving.
+        """
+        report = _report_with_three_claims()
+        report["references"][0]["engine"] = "lexical"
+        report["references"][0]["verdict"] = "supported"
+        pipeline.save(self.run_dir, report)
+
+        entry = self.set(claim_index=2, verdict="supported")
+        self.assertEqual(entry["verdict"], "supported")
+
+    def test_the_rollup_directions_are_opposite(self):
+        verdicts = ["supported", "weak", "related"]
+        self.assertEqual(match.roll_up(verdicts, "openai"), "weak")
+        self.assertEqual(match.roll_up(verdicts, "lexical"), "supported")
+
+    def test_what_the_tool_said_survives_on_the_citation(self):
+        claims = self.set(claim_index=1, verdict="supported")["claim_verdicts"]
+        self.assertEqual(claims[1]["machine_verdict"], "weak")
+        self.assertIn("not discussed", claims[1]["machine_reason"])
+
+    def test_undoing_one_citation_restores_the_headline(self):
+        self.set(claim_index=1, verdict="supported")
+        entry = self.set(claim_index=1, clear=True)
+        self.assertEqual(entry["claim_verdicts"][1]["verdict"], "weak")
+        self.assertEqual(entry["verdict"], "weak")
+        self.assertNotIn("reviewed", entry)
+        self.assertNotIn("override", entry["claim_verdicts"][1])
+
+    def test_a_reference_level_verdict_overrules_the_citations(self):
+        self.set(claim_index=0, verdict="unrelated")
+        entry = self.set(verdict="supported")
+        self.assertEqual(entry["verdict"], "supported")
+        self.assertEqual(entry["reviewed"]["source"], "reference")
+        # The citation edit is not destroyed, just no longer deciding.
+        self.assertEqual(entry["claim_verdicts"][0]["verdict"], "unrelated")
+
+    def test_clearing_the_reference_falls_back_to_the_citations(self):
+        self.set(claim_index=0, verdict="unrelated")
+        self.set(verdict="supported")
+        entry = self.set(clear=True)
+        self.assertEqual(entry["verdict"], "unrelated")
+        self.assertEqual(entry["reviewed"]["source"], "claims")
+
+    def test_the_tally_counts_edited_citations(self):
+        report = pipeline.set_verdict(self.run_dir, "12", claim_index=1, verdict="supported")
+        self.assertEqual(report["stats"]["claims_reviewed"], 1)
+        self.assertEqual(report["stats"]["reviewed"], 1)
+
+    def test_a_citation_that_does_not_exist_is_refused(self):
+        for bad in (3, -1):
+            with self.subTest(index=bad), self.assertRaises(KeyError):
+                self.set(claim_index=bad, verdict="supported")
+
+
 class RecheckTest(unittest.TestCase):
     """Re-running one reference has to move the report, not just the card."""
 

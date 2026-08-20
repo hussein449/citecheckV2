@@ -297,6 +297,21 @@ function renderCards() {
       setVerdict(btn.closest(".recheck").dataset.key, { clear: "1" });
     });
   });
+  $("cards").querySelectorAll(".claim-save").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest(".claim-actions");
+      setVerdict(row.dataset.key, {
+        claim_index: row.dataset.claim,
+        verdict: row.querySelector(".claim-pick").value,
+      });
+    });
+  });
+  $("cards").querySelectorAll(".claim-clear").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest(".claim-actions");
+      setVerdict(row.dataset.key, { claim_index: row.dataset.claim, clear: "1" });
+    });
+  });
   $("cards").querySelectorAll(".recheck input[type=file]").forEach((input) => {
     input.addEventListener("change", () => {
       const file = input.files?.[0];
@@ -368,17 +383,42 @@ async function setVerdict(key, fields) {
 
     currentReport = data.report;
     openKeys.add(key);
+
+    /* Changing a verdict can move a card out of the category being filtered on,
+       and a card that silently disappears the moment you edit it reads as the
+       edit having failed. Drop back to "all" so the reader keeps sight of the
+       thing they just changed. */
+    if (activeFilter !== "all" && data.entry.verdict !== activeFilter) {
+      activeFilter = "all";
+    }
     refreshResults();
 
+    const now = VERDICT_LABEL[data.entry.verdict] || data.entry.verdict;
     const after = document.querySelector(`.recheck[data-key="${key}"]`);
-    setNote(after?.querySelector(".recheck-status"), "status done",
-      fields.clear
-        ? `Back to the tool's verdict — ${VERDICT_LABEL[data.entry.verdict] || data.entry.verdict}.`
-        : `Recorded as your verdict: ${VERDICT_LABEL[data.entry.verdict] || data.entry.verdict}.`);
-    after?.scrollIntoView({ block: "center", behavior: "smooth" });
+    setNote(after?.querySelector(".recheck-status"), "status done", statusFor(fields, data.entry, now));
+    document.querySelector(`.card[data-key="${key}"]`)
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   } catch (err) {
     setNote(note, "status error", err.message);
   }
+}
+
+/* Always says where the card's headline ended up, because that is the thing the
+   reader is watching and it does not always follow the verdict they just set:
+   editing one citation of five re-derives the headline from all five, so
+   marking one "supported" can leave the card sitting at "weak" — correctly, and
+   confusingly if nobody says so. */
+function statusFor(fields, entry, now) {
+  const headline = `The card now reads ${now}.`;
+  if (fields.claim_index === undefined) {
+    return fields.clear
+      ? `Back to the tool's verdict — ${now}.`
+      : `Recorded as your verdict. ${headline}`;
+  }
+  const which = `Citation ${Number(fields.claim_index) + 1}`;
+  return fields.clear
+    ? `${which} is back to the tool's verdict. ${headline}`
+    : `${which} recorded as your verdict. ${headline}`;
 }
 
 function setNote(note, className, text) {
@@ -444,7 +484,7 @@ function cardHtml(entry) {
   const claims = entry.claim_verdicts || [];
   const claimsHtml = claims.length
     ? `<div class="section"><h4>Each place it's cited, judged separately</h4>
-         <div class="claims">${claims.map((c) => claimHtml(c, paperUrl)).join("")}</div></div>`
+         <div class="claims">${claims.map((c, i) => claimHtml(c, paperUrl, entry.key, i)).join("")}</div></div>`
     : `<div class="section"><h4>Where it's cited in your paper</h4>${
         (entry.citations || []).map((c) => `
           <blockquote class="quote">${esc(c.sentence)}
@@ -577,27 +617,36 @@ function reviewHtml(entry) {
     (v) => `<option value="${v}"${v === chosen ? " selected" : ""}>${esc(VERDICT_LABEL[v])}</option>`
   ).join("");
 
-  const standing = review
-    ? `<p class="review-was">You set this to <b>${esc(VERDICT_LABEL[review.verdict] || review.verdict)}</b>
+  const standing = !review
+    ? ""
+    : review.source === "claims"
+    /* Derived, not set directly: say so, or the reader sees "your verdict" on a
+       headline they never chose and cannot find where they chose it. */
+    ? `<p class="review-was">This card reads
+         <b>${esc(VERDICT_LABEL[review.verdict] || review.verdict)}</b> because you judged
+         ${review.edited_claims} of its citations yourself, above. The tool had it as
+         <b>${esc(VERDICT_LABEL[review.machine_verdict] || review.machine_verdict || "—")}</b>.</p>`
+    : `<p class="review-was">You set this to <b>${esc(VERDICT_LABEL[review.verdict] || review.verdict)}</b>
          on ${esc(review.at || "")}. The tool had it as
          <b>${esc(VERDICT_LABEL[review.machine_verdict] || review.machine_verdict || "—")}</b>.
-         ${review.note ? `<span class="review-note">“${esc(review.note)}”</span>` : ""}</p>`
-    : "";
+         ${review.note ? `<span class="review-note">“${esc(review.note)}”</span>` : ""}</p>`;
 
   return `
     <div class="review">
       <div class="recheck-actions">
         <select class="review-pick" aria-label="Your verdict for this reference">${options}</select>
         <button type="button" class="btn ghost review-save">Set this verdict myself</button>
-        ${review ? `<button type="button" class="btn ghost review-clear">Use the tool's verdict again</button>` : ""}
+        ${review?.source === "reference"
+          ? `<button type="button" class="btn ghost review-clear">Use the tool's verdict again</button>` : ""}
       </div>
-      <p class="review-hint">Recorded as yours, not the tool's — on the card, in the
+      <p class="review-hint">Sets the whole card at once, overruling the individual
+        citations above. Recorded as yours, not the tool's — on the card, in the
         tally and in the exported PDF.</p>
       ${standing}
     </div>`;
 }
 
-function claimHtml(claim, paperUrl) {
+function claimHtml(claim, paperUrl, key, index) {
   const verdict = claim.verdict || "unverified";
   const page = claim.page
     ? `<span class="where"><a href="${paperUrl}#page=${claim.page}" target="_blank" rel="noopener">page ${claim.page} ↗</a></span>`
@@ -611,17 +660,40 @@ function claimHtml(claim, paperUrl) {
     : "";
   const revisited = claim.reconsidered
     ? `<span class="revisited">softened after re-reading the abstract</span>` : "";
+  const mine = claim.override
+    ? `<span class="revisited yours">your verdict</span>` : "";
+
+  /* Each citation gets its own control, because a reader who has just read the
+     source usually disagrees with one of the five judgements on a reference,
+     not with all five. Without this the only way to correct one was to overrule
+     the whole reference, which throws away four verdicts that were right. */
+  const options = VERDICTS.map(
+    (v) => `<option value="${v}"${v === verdict ? " selected" : ""}>${esc(VERDICT_LABEL[v])}</option>`
+  ).join("");
+  const controls = `
+    <div class="claim-actions" data-key="${esc(key)}" data-claim="${index}">
+      <select class="claim-pick" aria-label="Your verdict for this citation">${options}</select>
+      <button type="button" class="btn ghost tiny claim-save">Set this one myself</button>
+      ${claim.override
+        ? `<button type="button" class="btn ghost tiny claim-clear">Undo</button>` : ""}
+    </div>`;
+
   return `
-    <div class="claim ${esc(verdict)}">
+    <div class="claim ${esc(verdict)}${claim.override ? " mine" : ""}">
       <div class="claim-top">
         <span class="badge ${esc(verdict)}">${esc(VERDICT_LABEL[verdict] || verdict)}</span>
-        ${page}${revisited}
+        ${page}${revisited}${mine}
       </div>
       <blockquote>${esc(claim.claim)}</blockquote>
       ${context}
       <p class="why">${esc(claim.reason || "")}</p>
+      ${claim.override && claim.machine_verdict
+        ? `<p class="claim-machine"><span>The tool said:</span>
+             ${esc(VERDICT_LABEL[claim.machine_verdict] || claim.machine_verdict)}
+             — ${esc(truncate(claim.machine_reason || "", 260))}</p>` : ""}
       ${claim.evidence_quote
         ? `<p class="verbatim">“${esc(truncate(claim.evidence_quote, 400))}”</p>` : ""}
+      ${controls}
     </div>`;
 }
 

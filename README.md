@@ -203,6 +203,20 @@ checks that were already right.
   screens; you decide. Once you have opened the source and read it, your
   judgement beats anything here.
 
+Each citation inside a card carries the same dropdown of its own, under
+*Each place it's cited, judged separately*. A reference cited five times holds
+five judgements, and a reader who has just read the source usually disagrees
+with one of them rather than all five — overruling the whole reference to fix
+one throws away four verdicts that were right.
+
+Editing a citation re-derives the card's headline from the claims beneath it,
+**the way the engine that produced them would have**: worst-case for the model
+tier, best-case for lexical (see [Rolling up](#rolling-up-to-one-headline)).
+Applying one tier's rule to the other's reference would mean improving a claim
+made the card look worse — in front of the person who had just improved it. The
+status line always says where the headline ended up, because it does not always
+follow the verdict you just set.
+
 What the indices said — that the work exists, that it has or has not been
 retracted — is carried over untouched when you supply a file, because none of it
 was re-tested. Only the content verdict is replaced.
