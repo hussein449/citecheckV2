@@ -288,8 +288,26 @@ def recheck(run_id: str):
     if state is not None:
         state["report"] = report_data
 
-    entry = next((e for e in report_data["references"] if e["key"] == key), None)
-    return jsonify({"report": report_data, "entry": entry})
+    return jsonify(_one_reference(report_data, key))
+
+
+def _one_reference(report: dict, key: str) -> dict:
+    """The reply to a change that touched exactly one reference.
+
+    Deliberately *not* the whole report. A 150-reference screening report is
+    around two megabytes of JSON, and returning it after every click meant a
+    verdict change — which costs the server 60ms — spent seconds on the wire
+    for a payload the client already held, all but one entry of it unchanged.
+    Only the entry, the derived tally and the derived warnings can have moved,
+    so only those come back.
+    """
+    return {
+        "entry": next(
+            (e for e in report.get("references") or [] if e["key"] == key), None
+        ),
+        "stats": report.get("stats", {}),
+        "warnings": report.get("warnings", []),
+    }
 
 
 @app.post("/api/verdict/<run_id>")
@@ -337,8 +355,7 @@ def verdict(run_id: str):
     if state is not None:
         state["report"] = report_data
 
-    entry = next((e for e in report_data["references"] if e["key"] == key), None)
-    return jsonify({"report": report_data, "entry": entry})
+    return jsonify(_one_reference(report_data, key))
 
 
 @app.get("/api/report/<run_id>")

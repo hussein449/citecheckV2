@@ -155,10 +155,17 @@ function renderReport(report, runId) {
   refreshResults();
 }
 
-/* Everything downstream of `currentReport`, rebuilt from it. Called again after
-   a single reference is re-checked, so the banner, the tally and the filters
-   never keep counting a verdict that has since been overturned. */
+/* Everything downstream of `currentReport`, rebuilt from it. */
 function refreshResults() {
+  refreshSummary();
+  renderCards();
+}
+
+/* The parts of the page that summarise the whole run: the banner, the tally,
+   the filters, the meta line. Separated from the cards because a change to one
+   reference moves all of these but only one card — and rebuilding 150 cards to
+   show that one of them changed is most of the cost of doing it. */
+function refreshSummary() {
   const report = currentReport || {};
   const s = report.stats || {};
   $("resultTitle").textContent = report.paper_title || report.source_pdf;
@@ -180,7 +187,28 @@ function refreshResults() {
   renderTally(s);
   renderWarnings(report.warnings);
   renderFilters(s.verdicts || {}, report.references || []);
-  renderCards();
+}
+
+/* Fold a single changed reference into the report the page is holding, without
+   the server having to send back the other 149. */
+function patchEntry(key, entry, stats, warnings) {
+  const list = currentReport.references || [];
+  const at = list.findIndex((r) => r.key === key);
+  if (at >= 0) list[at] = entry;
+  if (stats) currentReport.stats = stats;
+  if (warnings) currentReport.warnings = warnings;
+}
+
+/* Re-render one card in place. Its position in the list is deliberately left
+   alone even when its verdict changes the sort order: a card that jumps
+   somewhere else the instant you edit it is worse than a list that re-sorts on
+   the next filter change. */
+function replaceCard(key) {
+  const card = document.querySelector(`#cards .card[data-key="${key}"]`);
+  const entry = (currentReport.references || []).find((r) => r.key === key);
+  if (!card || !entry) { renderCards(); return; }
+  card.outerHTML = cardHtml(entry);
+  bindCards(document.querySelector(`#cards .card[data-key="${key}"]`));
 }
 
 // Names the engine that produced the verdicts, and how many references it
@@ -269,7 +297,14 @@ function renderCards() {
   $("cards").innerHTML = list.map(cardHtml).join("") ||
     `<p class="status">Nothing in this category.</p>`;
 
-  $("cards").querySelectorAll(".card-head").forEach((head) => {
+  bindCards($("cards"));
+}
+
+/* Wire up one card, or every card in a container. Split out of `renderCards`
+   so a single edited card can be re-rendered and re-bound on its own. */
+function bindCards(root) {
+  if (!root) return;
+  root.querySelectorAll(".card-head").forEach((head) => {
     head.addEventListener("click", () => {
       const card = head.parentElement;
       const open = card.classList.toggle("open");
@@ -277,27 +312,27 @@ function renderCards() {
       else openKeys.delete(card.dataset.key);
     });
   });
-  $("cards").querySelectorAll(".shot img").forEach((img) => {
+  root.querySelectorAll(".shot img").forEach((img) => {
     img.addEventListener("click", (e) => {
       e.stopPropagation();
       openLightbox(img.src, img.dataset.caption || "");
     });
   });
-  $("cards").querySelectorAll(".recheck-run").forEach((btn) => {
+  root.querySelectorAll(".recheck-run").forEach((btn) => {
     btn.addEventListener("click", () => runRecheck(btn.closest(".recheck").dataset.key, null));
   });
-  $("cards").querySelectorAll(".review-save").forEach((btn) => {
+  root.querySelectorAll(".review-save").forEach((btn) => {
     btn.addEventListener("click", () => {
       const box = btn.closest(".recheck");
       setVerdict(box.dataset.key, { verdict: box.querySelector(".review-pick").value });
     });
   });
-  $("cards").querySelectorAll(".review-clear").forEach((btn) => {
+  root.querySelectorAll(".review-clear").forEach((btn) => {
     btn.addEventListener("click", () => {
       setVerdict(btn.closest(".recheck").dataset.key, { clear: "1" });
     });
   });
-  $("cards").querySelectorAll(".claim-save").forEach((btn) => {
+  root.querySelectorAll(".claim-save").forEach((btn) => {
     btn.addEventListener("click", () => {
       const row = btn.closest(".claim-actions");
       setVerdict(row.dataset.key, {
@@ -306,13 +341,13 @@ function renderCards() {
       });
     });
   });
-  $("cards").querySelectorAll(".claim-clear").forEach((btn) => {
+  root.querySelectorAll(".claim-clear").forEach((btn) => {
     btn.addEventListener("click", () => {
       const row = btn.closest(".claim-actions");
       setVerdict(row.dataset.key, { claim_index: row.dataset.claim, clear: "1" });
     });
   });
-  $("cards").querySelectorAll(".recheck input[type=file]").forEach((input) => {
+  root.querySelectorAll(".recheck input[type=file]").forEach((input) => {
     input.addEventListener("change", () => {
       const file = input.files?.[0];
       // Cleared so picking the same file twice still fires a change event —
@@ -355,8 +390,14 @@ async function runRecheck(key, file) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Re-check failed (${res.status})`);
 
-    currentReport = data.report;
-    refreshResults();          // the card, and every control on it, is rebuilt
+    patchEntry(key, data.entry, data.stats, data.warnings);
+    refreshSummary();
+    if (activeFilter !== "all" && data.entry.verdict !== activeFilter) {
+      activeFilter = "all";
+      renderCards();
+    } else {
+      replaceCard(key);        // the card, and every control on it, is rebuilt
+    }
     reportRecheck(key, data.entry);
   } catch (err) {
     setNote(note, "status error", err.message);
@@ -381,17 +422,20 @@ async function setVerdict(key, fields) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Could not save that (${res.status})`);
 
-    currentReport = data.report;
+    patchEntry(key, data.entry, data.stats, data.warnings);
     openKeys.add(key);
+    refreshSummary();
 
     /* Changing a verdict can move a card out of the category being filtered on,
        and a card that silently disappears the moment you edit it reads as the
        edit having failed. Drop back to "all" so the reader keeps sight of the
-       thing they just changed. */
+       thing they just changed — the only case that needs the whole list rebuilt. */
     if (activeFilter !== "all" && data.entry.verdict !== activeFilter) {
       activeFilter = "all";
+      renderCards();
+    } else {
+      replaceCard(key);
     }
-    refreshResults();
 
     const now = VERDICT_LABEL[data.entry.verdict] || data.entry.verdict;
     const after = document.querySelector(`.recheck[data-key="${key}"]`);

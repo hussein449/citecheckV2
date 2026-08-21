@@ -971,6 +971,10 @@ def _settle_headline(entry: dict) -> None:
     entry["verdict"] = machine["verdict"]
     entry["reason"] = machine["reason"]
     entry.pop("reviewed", None)
+    # Nothing is displacing the tool's verdict any more, so the saved baseline
+    # is no longer holding anything up. Dropping it keeps undo lossless: the
+    # entry goes back to exactly the shape it had before anyone touched it.
+    entry.pop("machine", None)
 
 
 def _tally(claims: list[dict]) -> dict[str, int]:

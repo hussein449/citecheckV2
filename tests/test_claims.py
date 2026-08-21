@@ -391,12 +391,15 @@ class ManualVerdictTest(unittest.TestCase):
         self.assertEqual(entry["reviewed"]["machine_verdict"], "unrelated")
 
     def test_clearing_restores_the_tool_exactly(self):
+        """Undo is lossless: the entry goes back to the shape it had before."""
         before = self.entry(json.loads((self.run_dir / "report.json").read_text(encoding="utf-8")))
         self.set(verdict="supported", note="a note")
         entry = self.entry(self.set(clear=True))
         self.assertEqual(entry["verdict"], before["verdict"])
         self.assertEqual(entry["reason"], before["reason"])
         self.assertNotIn("reviewed", entry)
+        self.assertNotIn("machine", entry)
+        self.assertNotIn("override", entry)
 
     def test_the_banner_admits_the_verdict_was_set_by_hand(self):
         """A report reading 'clear' because someone marked it clear is a
