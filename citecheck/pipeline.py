@@ -313,12 +313,22 @@ def summarise(report: dict) -> dict:
         report["base_warnings"] = base
 
     verdicts: dict[str, int] = {}
+    # Counted separately from the reference headlines above, and never folded
+    # into them. A reference headlines as the *most concerning* of the citations
+    # beneath it, so one cited five times that supports four and oversells the
+    # fifth is counted once, as the fifth — and its four supported citations
+    # appear nowhere in a reference-level tally. Those four are on the card the
+    # reader is looking at, which is why a tally that omits them reads as simply
+    # wrong. Both numbers are kept so the summary can show both.
+    claim_verdicts: dict[str, int] = {}
     derived: list[str] = []
     flagged = retracted = not_found = claims_judged = rechecked = reviewed = 0
     claims_reviewed = 0
 
     for entry in references:
         verdicts[entry["verdict"]] = verdicts.get(entry["verdict"], 0) + 1
+        for claim in entry.get("claim_verdicts") or []:
+            claim_verdicts[claim["verdict"]] = claim_verdicts.get(claim["verdict"], 0) + 1
         claims_judged += len(entry.get("claim_verdicts") or [])
         if (entry.get("source") or {}).get("retracted"):
             retracted += 1
@@ -340,6 +350,7 @@ def summarise(report: dict) -> dict:
                 break
 
     stats["verdicts"] = verdicts
+    stats["claim_verdicts"] = claim_verdicts
     stats["flagged"] = flagged
     stats["retracted"] = retracted
     stats["not_found"] = not_found
@@ -1059,6 +1070,7 @@ def recheck_one(
     options: Options,
     paper_path: str = "",
     supplied: SuppliedSource | None = None,
+    claim_index: int | None = None,
 ) -> dict:
     """Re-run a single reference and fold the result back into its report.
 
@@ -1069,6 +1081,12 @@ def recheck_one(
     to the wrong document, or to a paywall it could not read, the reader often
     has the actual paper on disk: `supplied` judges the citation against that
     instead, which is better evidence than any lookup.
+
+    `claim_index` narrows all of that to one citation. A reference cited five
+    times is making five claims, and a reader who doubts one of them has no
+    business spending five model calls to answer it — nor should the four
+    verdicts they were content with be thrown away, along with any they had set
+    by hand, to re-answer the fifth. Omit it to re-check the whole reference.
 
     The re-checked entry replaces the old one in `report.json` and the run-level
     tally, banner and warnings are all recomputed from it.
@@ -1088,6 +1106,19 @@ def recheck_one(
     citations = [_rebuild(intext.Citation, c) for c in previous.get("citations") or []]
     duplicate_of = _duplicate_of(previous)
     shots_dir = run_dir / "shots"
+
+    if claim_index is not None:
+        report["references"][index] = _recheck_claim(
+            previous=previous,
+            reference=reference,
+            citations=citations,
+            claim_index=claim_index,
+            options=options,
+            supplied=supplied,
+        )
+        summarise(report)
+        save(run_dir, report)
+        return report
 
     try:
         if supplied is not None:
@@ -1116,6 +1147,41 @@ def recheck_one(
         if options.take_screenshots:
             shots.close_thread_browser()
 
+    stamp = datetime.now().isoformat(timespec="seconds")
+    against = "supplied" if supplied is not None else "sources"
+    filename = supplied.name if supplied is not None else ""
+
+    # A re-check that came back with nothing readable did not overturn the
+    # earlier finding — it failed to retrieve anything to judge. Letting it
+    # through is exactly how a reference reads "unrelated" after one re-check
+    # and "unverified" after the next: the publisher served the full text one
+    # minute and a paywall stub the next, and the verdict followed the
+    # retrieval rather than the citation. Nothing about the citation changed.
+    #
+    # The earlier entry is kept whole rather than having its verdict patched
+    # back in, because its verdict, evidence text and screenshots all describe
+    # one retrieval; restoring the headline alone leaves a card whose evidence
+    # contradicts it. The failure is reported as a failure instead.
+    if _retrieved_nothing(entry) and previous.get("engine"):
+        detail = entry.get("reason") or "Nothing readable was retrieved this time."
+        entry = dict(previous)
+        entry["rechecked"] = {
+            "at": stamp,
+            "against": against,
+            "filename": filename,
+            "previous_verdict": previous.get("verdict", ""),
+            # Nothing was displaced, so a hand-set verdict here is still a
+            # judgement about the evidence still on the card. Clearing it would
+            # throw away the reader's own conclusion to record a failed lookup.
+            "cleared_review": "",
+            "outcome": "nothing_retrieved",
+            "detail": detail,
+        }
+        report["references"][index] = entry
+        summarise(report)
+        save(run_dir, report)
+        return report
+
     # A hand-set verdict was a judgement about evidence that has just been
     # replaced. Carrying it forward would attach the reader's name to a reading
     # of something they never saw, so it is dropped — and said out loud, because
@@ -1125,11 +1191,12 @@ def recheck_one(
         entry.pop(stale, None)
 
     entry["rechecked"] = {
-        "at": datetime.now().isoformat(timespec="seconds"),
-        "against": "supplied" if supplied is not None else "sources",
-        "filename": supplied.name if supplied is not None else "",
+        "at": stamp,
+        "against": against,
+        "filename": filename,
         "previous_verdict": previous.get("verdict", ""),
         "cleared_review": displaced,
+        "outcome": "judged",
     }
     # A verdict that has been re-run is no longer a casualty of the run's clock.
     entry.pop("timed_out", None)
@@ -1138,6 +1205,261 @@ def recheck_one(
     summarise(report)
     save(run_dir, report)
     return report
+
+
+def _retrieved_nothing(entry: dict) -> bool:
+    """Whether a check came back with no judgeable text at all.
+
+    `not_found` is excluded deliberately: an index reporting that it has no
+    record of a reference is a real finding *about the reference*, not a failure
+    to retrieve one, and it must be allowed to replace an earlier verdict.
+    """
+    return not entry.get("engine") and entry.get("verdict") != "not_found"
+
+
+# --------------------------------------------------------------------------- #
+# Re-checking one citation of one reference
+# --------------------------------------------------------------------------- #
+
+def _recheck_claim(
+    previous: dict,
+    reference: refs.Reference,
+    citations: list[intext.Citation],
+    claim_index: int,
+    options: Options,
+    supplied: SuppliedSource | None = None,
+) -> dict:
+    """Re-judge one citation, leaving the others on the card exactly as they are.
+
+    The narrow scope is the whole point, so it is enforced rather than assumed:
+    one claim goes to the judge, one claim verdict comes back, and it is spliced
+    into position. Its siblings are not re-read, not re-scored and not re-fetched
+    for — including any the reader has judged themselves, which a whole-reference
+    re-check would have cleared.
+
+    Screenshots are skipped outright. The card's evidence capture describes the
+    reference as a whole, and overwriting it on the strength of one re-judged
+    citation would leave the other four pointing at a picture of something else.
+    The re-judged claim carries its own quoted evidence in its own row.
+    """
+    stored = list(previous.get("claim_verdicts") or [])
+    if not 0 <= claim_index < len(stored):
+        raise KeyError(
+            f"Reference {previous.get('key')} has no citation {claim_index + 1}; "
+            f"it has {len(stored)}."
+        )
+
+    entry = dict(previous)
+    entry["notes"] = list(previous.get("notes") or [])
+    was = stored[claim_index]
+    claim = _claim_at(citations, stored, claim_index)
+    stamp = datetime.now().isoformat(timespec="seconds")
+    against = "supplied" if supplied is not None else "sources"
+    filename = supplied.name if supplied is not None else ""
+
+    if supplied is not None:
+        body, title, abstract, failure = supplied.text, supplied.name, "", ""
+    else:
+        body, title, abstract, failure = _retrieve_text(reference)
+
+    # Nothing came back, so nothing was learned. The citation keeps the verdict
+    # it had — see the whole-reference case for why a failed lookup must never
+    # be allowed to present itself as a new judgement.
+    if failure:
+        entry["claim_verdicts"] = stored
+        entry["rechecked"] = {
+            "at": stamp,
+            "against": against,
+            "filename": filename,
+            "previous_verdict": previous.get("verdict", ""),
+            "cleared_review": "",
+            "outcome": "nothing_retrieved",
+            "detail": failure,
+            "scope": "claim",
+            "claim_index": claim_index,
+        }
+        return entry
+
+    result = match.judge(
+        claims=[claim],
+        source_text=body,
+        title=title or reference.title,
+        abstract=abstract,
+        reference_line=reference.raw,
+        use_model=options.use_model,
+        max_claims=1,
+    )
+    fresh = (
+        result.claim_verdicts[0].to_dict()
+        if result.claim_verdicts
+        else {
+            "claim": claim.text,
+            "verdict": result.verdict,
+            "score": round(result.score, 3),
+            "reason": result.reason,
+            "evidence_quote": "",
+            "page": claim.page,
+            "context": claim.context if claim.context != claim.text else "",
+            "reconsidered": False,
+        }
+    )
+    # A verdict the reader set on *this* citation judged evidence that has just
+    # been replaced, so it goes — the same rule the whole-reference re-check
+    # applies, narrowed to the one citation whose evidence actually moved.
+    displaced = (was.get("override") or {}).get("verdict", "")
+    fresh["rechecked"] = {
+        "at": stamp,
+        "against": against,
+        "filename": filename,
+        "previous_verdict": was.get("verdict", ""),
+        "cleared_review": displaced,
+        "source_title": title,
+    }
+
+    claims = list(stored)
+    claims[claim_index] = fresh
+    entry["claim_verdicts"] = claims
+    entry["claim_tally"] = _tally(claims)
+    entry["engine"] = _stronger_engine(previous.get("engine", ""), result.engine)
+
+    # The tool's own headline has genuinely moved — one of the citations under
+    # it was re-judged — so the baseline `_settle_headline` restores to is
+    # rewritten here rather than left at what the tool concluded last time.
+    # Rolled up from what the *tool* said about each citation, so a verdict the
+    # reader set on a sibling does not quietly become part of the tool's record.
+    rolled = match.roll_up(_machine_verdicts(claims), entry["engine"])
+    entry["machine"] = {
+        "verdict": rolled,
+        "reason": _claim_rollup_reason(claims, claim_index, rolled),
+    }
+    _settle_headline(entry)
+
+    entry["rechecked"] = {
+        "at": stamp,
+        "against": against,
+        "filename": filename,
+        "previous_verdict": previous.get("verdict", ""),
+        "cleared_review": displaced,
+        "outcome": "judged",
+        "scope": "claim",
+        "claim_index": claim_index,
+    }
+    entry.pop("timed_out", None)
+    return entry
+
+
+def _claim_at(
+    citations: list[intext.Citation], stored: list[dict], claim_index: int
+) -> match.Claim:
+    """The claim behind a stored claim verdict, rebuilt from the citations.
+
+    Rebuilt rather than reconstructed from the stored verdict because a stored
+    verdict does not carry `co_cited`, and a group citation judged as though it
+    were the only source cited at that point is exactly the misreading
+    `_claims_for` exists to prevent — it would be asked to support the whole
+    sentence and marked down for the parts belonging to its neighbours.
+
+    Matched on text first so that a report whose claim list has since been
+    ordered differently still re-checks the citation the reader clicked on,
+    rather than whichever one now sits at that index.
+    """
+    rebuilt = _claims_for(citations)
+    wanted = (stored[claim_index].get("claim") or "").strip()
+    for claim in rebuilt:
+        if claim.text.strip() == wanted:
+            return claim
+    if claim_index < len(rebuilt):
+        return rebuilt[claim_index]
+    # The citations are gone from the report but the claim text survives, so
+    # judge that on its own rather than refusing.
+    return match.Claim(
+        text=wanted, context=stored[claim_index].get("context", "") or wanted
+    )
+
+
+def _stronger_engine(previous: str, fresh: str) -> str:
+    """Which engine a card is labelled with after only part of it was re-judged.
+
+    The label is not cosmetic: `match.roll_up` reads it, and the two tiers roll
+    up in opposite directions — the model tier takes the most concerning claim,
+    the lexical tier the least. So letting one lexically re-judged citation
+    relabel the whole card as lexical would switch its untouched siblings from
+    worst-case to best-case, cancelling two "unrelated" verdicts into a headline
+    of "unverified" on the strength of nothing anyone re-examined.
+
+    A model verdict is evidence and a lexical score is not, so the stronger of
+    the two labels wins and a scoped re-check can never quietly loosen the rule
+    the rest of the card is judged by.
+    """
+    if previous and previous != "lexical" and (not fresh or fresh == "lexical"):
+        return previous
+    return fresh or previous
+
+
+def _machine_verdicts(claims: list[dict]) -> list[str]:
+    """What the tool itself concluded for each citation, ignoring overrides."""
+    return [c.get("machine_verdict") or c.get("verdict", "") for c in claims]
+
+
+def _claim_rollup_reason(claims: list[dict], claim_index: int, rolled: str) -> str:
+    """Why the card reads what it reads after one citation was re-checked.
+
+    Says which citation moved before it says where the card landed, because the
+    two often disagree: re-checking citation three of five to "supported" leaves
+    a card that still reads "weak" on the strength of citation one, and a reader
+    who is not told that reads it as the re-check having failed.
+    """
+    fresh = claims[claim_index]
+    if len(claims) <= 1:
+        return fresh.get("reason", "")
+    tally = _tally(claims)
+    summary = ", ".join(
+        f"{n} {verdict}"
+        for verdict, n in sorted(tally.items(), key=lambda kv: -match.concern(kv[0]))
+    )
+    return (
+        f"Citation {claim_index + 1} of {len(claims)} was re-checked on its own and "
+        f"now reads “{fresh.get('verdict', '')}”. Rolled up across all "
+        f"{len(claims)} ({summary}), this reference reads “{rolled}”. "
+        f"{fresh.get('reason', '')}"
+    ).strip()
+
+
+def _retrieve_text(reference: refs.Reference) -> tuple[str, str, str, str]:
+    """Resolve and fetch one reference, for judging a single citation against.
+
+    Returns `(body, title, abstract, failure)`. `failure` is a reader-facing
+    sentence and is empty only when there is text worth judging.
+
+    Deliberately does not touch flags, retraction findings or the card's stored
+    source record. Those describe the reference, and this is being called to
+    answer a question about one citation of it — a single-citation re-check that
+    quietly rewrote the card's retraction status would be doing something nobody
+    asked it to.
+    """
+    try:
+        source = resolve.resolve(reference)
+    except Exception as exc:
+        return "", "", "", f"The reference could not be looked up ({type(exc).__name__})."
+
+    if source.existence == "not_found":
+        return "", "", "", (
+            "No bibliographic index has any record of this reference — a finding "
+            "about the whole reference rather than this one citation. Re-check "
+            "the reference itself to record it."
+        )
+    if not source.url and not source.abstract:
+        return "", "", "", "No link or indexed record was found for this reference."
+
+    try:
+        content = fetch.fetch_source(source)
+    except Exception as exc:
+        return "", "", "", f"The cited source could not be downloaded ({type(exc).__name__})."
+
+    body = content.text or source.abstract
+    if not (body or "").strip():
+        return "", "", "", "Nothing readable was retrieved from the cited source."
+    return body, content.title or source.title, source.abstract, ""
 
 
 def _duplicate_of(entry: dict) -> str:

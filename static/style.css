@@ -287,6 +287,15 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
   font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
   color: var(--ink-dim); font-weight: 600;
 }
+/* The citation count under each tile. Deliberately quieter than the reference
+   count above it: it is the finer grain, not a competing headline. */
+.tile .sub {
+  display: block; margin-top: 5px; font-size: 11px;
+  color: var(--ink-dim); font-variant-numeric: tabular-nums;
+}
+.tally-note {
+  margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--ink-dim);
+}
 .tile.supported .n { color: var(--ok); }
 .tile.related   .n { color: var(--info); }
 .tile.weak      .n { color: var(--mid); }
@@ -423,6 +432,22 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
   cursor: pointer;
 }
 .btn.tiny { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
+/* The per-citation status line spans the whole control row rather than sitting
+   inline with the buttons: it is a sentence, and wrapping it between two
+   buttons makes both harder to hit. */
+.claim-status {
+  flex-basis: 100%; margin: 4px 0 0; font-size: 12.2px; line-height: 1.5;
+}
+.claim-status.working { color: var(--ink-dim); }
+.claim-status.done { color: var(--ok); font-weight: 550; }
+.claim-status.warn { color: var(--mid); font-weight: 550; }
+.claim-status.error { color: var(--bad); font-weight: 550; }
+/* What the last re-check of this one citation did. Kept on paper, like the
+   card-level line, because whoever receives the PDF has the same right to know
+   a verdict came from a re-check rather than from the original screening. */
+.claim-was {
+  margin: 7px 0 0; font-size: 11.8px; color: var(--ink-dim); font-style: italic;
+}
 .claim.mine { border-left-width: 5px; background: var(--accent-soft); }
 .revisited.yours { color: var(--accent); background: #fff; }
 .claim-machine {
@@ -474,6 +499,9 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 .recheck-status.working { color: var(--ink-dim); }
 .recheck-status.done { color: var(--ok); font-weight: 550; }
 .recheck-status.error { color: var(--bad); font-weight: 550; }
+/* A re-check that retrieved nothing. Not green — nothing was established — and
+   not red either, because the reference itself is not the problem. */
+.recheck-status.warn { color: var(--mid); font-weight: 550; line-height: 1.55; }
 /* Every control in the panel goes inert while a re-check is in flight — one of
    them is a <label>, which cannot be disabled the way a button can. */
 .btn.busy { opacity: .55; pointer-events: none; }
@@ -577,7 +605,9 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
   .recheck > .status, .recheck-status, .review-hint,
   .lightbox, #panel-upload, #panel-progress, .chev { display: none !important; }
   /* A citation the reader judged themselves keeps its marking on paper — the
-     reason line and "the tool said" block both print. */
+     reason line, the "the tool said" block and the per-citation re-check note
+     all print. `.claim-actions` is hidden with the other controls above. */
+  .claim-was { display: block !important; }
   .claim.mine { border-left-width: 5px; }
   .recheck { border: 0; padding: 0; background: none; }
   .recheck:not(:has(.recheck-was, .review-was)) { display: none !important; }

@@ -199,6 +199,31 @@ function patchEntry(key, entry, stats, warnings) {
   if (warnings) currentReport.warnings = warnings;
 }
 
+/* Rebuild whatever a verdict change touched without the page moving under the
+   reader.
+
+   Three things used to move it, and all three were unasked for. The summary
+   above the list changes height when a tile or a warning appears. A filter
+   reset re-sorts the entire list, so a different reference lands where the
+   reader was looking. And both paths then smooth-scrolled to the edited card —
+   an animation measured in seconds on a long report, for a card that was
+   already on screen, because the reader had just clicked a button on it.
+
+   So the card's distance from the top of the viewport is measured before the
+   rebuild and restored after it. The list rearranges around the thing being
+   edited while that thing stays exactly where the eye already is. */
+function keepInPlace(key, rebuild) {
+  const card = () => document.querySelector(`#cards .card[data-key="${key}"]`);
+  const before = card()?.getBoundingClientRect().top;
+  rebuild();
+  const after = card()?.getBoundingClientRect().top;
+  // Not smooth, and not `scrollIntoView`: this corrects a shift the reader
+  // never asked for, so it has to be invisible rather than animated.
+  if (before != null && after != null && after !== before) {
+    window.scrollBy(0, after - before);
+  }
+}
+
 /* Re-render one card in place. Its position in the list is deliberately left
    alone even when its verdict changes the sort order: a card that jumps
    somewhere else the instant you edit it is worse than a list that re-sorts on
@@ -232,20 +257,51 @@ function renderRisk(risk) {
     "</ul>";
 }
 
+/* Two different things are counted here, and conflating them is what made this
+   tally read as wrong. A reference's headline is the *most concerning* of the
+   citations beneath it, so one cited five times that supports four and oversells
+   the fifth headlines as the fifth — its four supported citations are on the
+   card the reader is looking at, but a reference-level count never shows them.
+   Counting "6 supported" while the cards plainly show more is not a rounding
+   difference; it is two different questions. Both are answered, and labelled. */
 function renderTally(stats) {
-  const counts = stats.verdicts || {};
-  const tiles = VERDICTS.filter((v) => counts[v]).map(
-    (v) => `<div class="tile ${v}"><span class="n">${counts[v]}</span>
-              <span class="k">${esc(VERDICT_LABEL[v])}</span></div>`
-  );
+  const refs = stats.verdicts || {};
+  const claims = stats.claim_verdicts || {};
+  /* A verdict can exist at claim level and nowhere at reference level — three
+     supported citations spread across references that each headline as
+     something worse. Filtering on the reference count alone drops that tile and
+     the citations with it. */
+  const tiles = VERDICTS.filter((v) => refs[v] || claims[v]).map((v) => {
+    const r = refs[v] || 0;
+    const c = claims[v] || 0;
+    return `<div class="tile ${v}"><span class="n">${r}</span>
+              <span class="k">${esc(VERDICT_LABEL[v])}</span>
+              <span class="sub">${plural(r, "reference")}${
+                c ? ` · ${plural(c, "citation")}` : ""
+              }</span></div>`;
+  });
   /* Retractions never show up as a verdict — a retracted paper can still
      support the claim it was cited for. They need their own tile or they
      vanish from the summary entirely. */
   if (stats.retracted) {
     tiles.unshift(`<div class="tile unrelated"><span class="n">${stats.retracted}</span>
-                     <span class="k">Retracted</span></div>`);
+                     <span class="k">Retracted</span>
+                     <span class="sub">${plural(stats.retracted, "reference")}</span></div>`);
   }
   $("tally").innerHTML = tiles.join("");
+
+  const caption = $("tallyNote");
+  if (!caption) return;
+  const anySplit = VERDICTS.some((v) => (claims[v] || 0) !== (refs[v] || 0));
+  caption.hidden = !tiles.length || !anySplit;
+  caption.textContent =
+    "Big number counts references; a reference takes the verdict of its most " +
+    "concerning citation. The line beneath each tile counts the individual " +
+    "citations, which is what the cards below show.";
+}
+
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
 function renderWarnings(warnings) {
@@ -260,8 +316,12 @@ function renderWarnings(warnings) {
 
 function renderFilters(counts, references) {
   const present = ["all", ...VERDICTS.filter((v) => counts[v])];
+  /* These filter cards, and a card is a reference — so these are reference
+     counts, matching the big number on each tile rather than its citation line. */
   $("filters").innerHTML = present
-    .map((v) => `<button data-f="${v}">${
+    .map((v) => `<button data-f="${v}" title="${
+      v === "all" ? "Every reference" : `References headlining as ${VERDICT_LABEL[v]}`
+    }">${
       v === "all" ? `All (${references.length})` : `${VERDICT_LABEL[v]} (${counts[v]})`
     }</button>`)
     .join("");
@@ -347,6 +407,21 @@ function bindCards(root) {
       setVerdict(row.dataset.key, { claim_index: row.dataset.claim, clear: "1" });
     });
   });
+  root.querySelectorAll(".claim-recheck").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest(".claim-actions");
+      runRecheck(row.dataset.key, null, Number(row.dataset.claim));
+    });
+  });
+  root.querySelectorAll(".claim-actions input[type=file]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const file = input.files?.[0];
+      // Cleared so picking the same file twice still fires a change event.
+      const row = input.closest(".claim-actions");
+      input.value = "";
+      if (file) runRecheck(row.dataset.key, file, Number(row.dataset.claim));
+    });
+  });
   root.querySelectorAll(".recheck input[type=file]").forEach((input) => {
     input.addEventListener("change", () => {
       const file = input.files?.[0];
@@ -365,22 +440,33 @@ function bindCards(root) {
    wrong: it resolved to the wrong paper, or read a paywall stub, or the
    publisher was simply down. Re-running the whole paper to settle one reference
    costs minutes and re-does 200 checks that were already right. */
-async function runRecheck(key, file) {
+async function runRecheck(key, file, claimIndex = null) {
   if (recheckInFlight) return;
 
-  const box = document.querySelector(`.recheck[data-key="${key}"]`);
-  const note = box?.querySelector(".recheck-status");
+  /* One citation or the whole reference. The controls live in different places
+     — a claim row versus the card's re-check panel — so the busy state and the
+     status line follow whichever one was clicked, and a single-citation
+     re-check never lights up the card as though all of it were re-running. */
+  const scoped = claimIndex != null;
+  const box = scoped
+    ? document.querySelector(`.claim-actions[data-key="${key}"][data-claim="${claimIndex}"]`)
+    : document.querySelector(`.recheck[data-key="${key}"]`);
+  const note = box?.querySelector(scoped ? ".claim-status" : ".recheck-status");
+  const noteClass = scoped ? "claim-status" : "recheck-status";
   const controls = box ? [...box.querySelectorAll(".btn")] : [];
 
   recheckInFlight = true;
   openKeys.add(key);
   controls.forEach((el) => el.classList.add("busy"));
   setNote(note, "status working", file
-    ? `Judging this reference against ${file.name}…`
-    : "Looking this reference up again and re-reading the source…");
+    ? `Judging ${scoped ? "this citation" : "this reference"} against ${file.name}…`
+    : scoped
+      ? "Looking the source up again and re-reading it for this citation only…"
+      : "Looking this reference up again and re-reading the source…", noteClass);
 
   const body = new FormData();
   body.append("key", key);
+  if (scoped) body.append("claim_index", String(claimIndex));
   if (file) body.append("source", file);
   body.append("use_model", $("useModel").checked && !$("useModel").disabled ? "1" : "0");
   body.append("screenshots", $("useShots").checked && !$("useShots").disabled ? "1" : "0");
@@ -391,16 +477,25 @@ async function runRecheck(key, file) {
     if (!res.ok) throw new Error(data.error || `Re-check failed (${res.status})`);
 
     patchEntry(key, data.entry, data.stats, data.warnings);
-    refreshSummary();
-    if (activeFilter !== "all" && data.entry.verdict !== activeFilter) {
-      activeFilter = "all";
-      renderCards();
-    } else {
-      replaceCard(key);        // the card, and every control on it, is rebuilt
-    }
-    reportRecheck(key, data.entry);
+    keepInPlace(key, () => {
+      refreshSummary();
+      if (activeFilter !== "all" && data.entry.verdict !== activeFilter) {
+        activeFilter = "all";
+        renderCards();
+      } else {
+        replaceCard(key);      // the card, and every control on it, is rebuilt
+      }
+    });
+    reportRecheck(key, data.entry, claimIndex);
   } catch (err) {
-    setNote(note, "status error", err.message);
+    setNote(
+      document.querySelector(
+        scoped
+          ? `.claim-actions[data-key="${key}"][data-claim="${claimIndex}"] .claim-status`
+          : `.recheck[data-key="${key}"] .recheck-status`
+      ),
+      "status error", err.message, noteClass
+    );
   } finally {
     recheckInFlight = false;
     controls.forEach((el) => el.classList.remove("busy"));
@@ -424,24 +519,24 @@ async function setVerdict(key, fields) {
 
     patchEntry(key, data.entry, data.stats, data.warnings);
     openKeys.add(key);
-    refreshSummary();
 
     /* Changing a verdict can move a card out of the category being filtered on,
        and a card that silently disappears the moment you edit it reads as the
        edit having failed. Drop back to "all" so the reader keeps sight of the
        thing they just changed — the only case that needs the whole list rebuilt. */
-    if (activeFilter !== "all" && data.entry.verdict !== activeFilter) {
-      activeFilter = "all";
-      renderCards();
-    } else {
-      replaceCard(key);
-    }
+    keepInPlace(key, () => {
+      refreshSummary();
+      if (activeFilter !== "all" && data.entry.verdict !== activeFilter) {
+        activeFilter = "all";
+        renderCards();
+      } else {
+        replaceCard(key);
+      }
+    });
 
     const now = VERDICT_LABEL[data.entry.verdict] || data.entry.verdict;
     const after = document.querySelector(`.recheck[data-key="${key}"]`);
     setNote(after?.querySelector(".recheck-status"), "status done", statusFor(fields, data.entry, now));
-    document.querySelector(`.card[data-key="${key}"]`)
-      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   } catch (err) {
     setNote(note, "status error", err.message);
   }
@@ -465,35 +560,86 @@ function statusFor(fields, entry, now) {
     : `${which} recorded as your verdict. ${headline}`;
 }
 
-function setNote(note, className, text) {
+function setNote(note, className, text, base = "recheck-status") {
   if (!note) return;
   note.hidden = false;
-  note.className = `recheck-status ${className}`;
+  note.className = `${base} ${className}`;
   note.textContent = text;
 }
 
 /* Says what changed, not just that something happened. "Still unverified" is a
    real answer and the reader needs to be told it plainly, or they will keep
-   pressing the button expecting a different one. */
-function reportRecheck(key, entry) {
-  const box = document.querySelector(`.recheck[data-key="${key}"]`);
+   pressing the button expecting a different one.
+
+   Writes the line and nothing else — the reader clicked a button on this card,
+   so the card is already in front of them and `keepInPlace` has held it there. */
+function reportRecheck(key, entry, claimIndex = null) {
+  const scoped = claimIndex != null;
+  const box = scoped
+    ? document.querySelector(`.claim-actions[data-key="${key}"][data-claim="${claimIndex}"]`)
+    : document.querySelector(`.recheck[data-key="${key}"]`);
   if (!box || !entry) return;
-  const was = entry.rechecked?.previous_verdict;
+  const noteClass = scoped ? "claim-status" : "recheck-status";
+  const note = box.querySelector(scoped ? ".claim-status" : ".recheck-status");
+  const done = entry.rechecked || {};
+  const was = done.previous_verdict;
   const now = VERDICT_LABEL[entry.verdict] || entry.verdict;
+
+  /* The citation moved; the card's headline may not have. Re-checking citation
+     three to "supported" can correctly leave a card reading "weak" on the
+     strength of citation one, and a reader told only the headline reads that as
+     the re-check having done nothing. Both are reported, in that order. */
+  if (scoped && done.outcome === "judged") {
+    const claim = (entry.claim_verdicts || [])[claimIndex] || {};
+    const wasClaim = claim.rechecked?.previous_verdict;
+    const nowClaim = VERDICT_LABEL[claim.verdict] || claim.verdict;
+    const moved = wasClaim && wasClaim !== claim.verdict
+      ? `Citation ${claimIndex + 1}: ${VERDICT_LABEL[wasClaim] || wasClaim} → ${nowClaim}.`
+      : `Citation ${claimIndex + 1} re-checked — still ${nowClaim}.`;
+    const dropped = claim.rechecked?.cleared_review
+      ? " Your own verdict on it was cleared — it judged the evidence this replaced."
+      : "";
+    setNote(note, "status done",
+      `${moved} The card now reads ${now}.${dropped} The other citations were not re-checked.`,
+      noteClass);
+    return;
+  }
+
+  /* The lookup came back empty, so nothing was re-judged and the earlier
+     finding stands. Reporting that as a verdict — "still unverified" — is what
+     made re-checking look like the tool changing its mind: the reader sees a
+     verdict move, or fail to, and has no way to tell that the source simply
+     did not load this time. Say which of the two happened. */
+  if (done.outcome === "nothing_retrieved") {
+    const what = scoped ? `citation ${claimIndex + 1} still reads` : "the verdict is unchanged at";
+    const stands = scoped
+      ? VERDICT_LABEL[((entry.claim_verdicts || [])[claimIndex] || {}).verdict] || now
+      : now;
+    setNote(
+      note,
+      "status warn",
+      `Nothing was retrieved this time, so ${what} ${stands}. ` +
+        `${done.detail || ""} This is a failed lookup, not a new judgement — ` +
+        `if you have the source yourself, judge it against that instead.`,
+      noteClass
+    );
+    return;
+  }
+
   /* Their own verdict was a reading of evidence this re-check has just
      replaced, so it was dropped. Losing someone's conclusion silently is worse
      than losing it. */
-  const dropped = entry.rechecked?.cleared_review
+  const dropped = done.cleared_review
     ? ` Your own verdict was cleared — it judged the evidence this replaced.`
     : "";
   setNote(
-    box.querySelector(".recheck-status"),
+    note,
     "status done",
     (was && was !== entry.verdict
       ? `Re-checked: ${VERDICT_LABEL[was] || was} → ${now}.`
-      : `Re-checked — the verdict is still ${now}.`) + dropped
+      : `Re-checked — the verdict is still ${now}.`) + dropped,
+    noteClass
   );
-  box.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 function cardHtml(entry) {
@@ -624,11 +770,15 @@ function cardHtml(entry) {
 /* Sits directly under the verdict, because that is where a reader decides they
    disagree with it. */
 function recheckHtml(entry) {
-  const done = entry.rechecked
-    ? `<p class="recheck-was">Last re-checked ${esc(entry.rechecked.at || "")}${
-        entry.rechecked.against === "supplied"
-          ? ` against <b>${esc(entry.rechecked.filename || "a supplied file")}</b>`
-          : " against the citation indexes"}.</p>`
+  const last = entry.rechecked;
+  const done = last
+    ? `<p class="recheck-was">Last re-checked ${esc(last.at || "")}${
+        last.against === "supplied"
+          ? ` against <b>${esc(last.filename || "a supplied file")}</b>`
+          : " against the citation indexes"}.${
+        last.outcome === "nothing_retrieved"
+          ? " That re-check retrieved nothing, so the verdict above is the earlier one."
+          : ""}</p>`
     : "";
   return `
     <div class="section recheck" data-key="${esc(entry.key)}">
@@ -720,7 +870,27 @@ function claimHtml(claim, paperUrl, key, index) {
       <button type="button" class="btn ghost tiny claim-save">Set this one myself</button>
       ${claim.override
         ? `<button type="button" class="btn ghost tiny claim-clear">Undo</button>` : ""}
+      <button type="button" class="btn ghost tiny claim-recheck">Re-check just this one</button>
+      <label class="btn ghost tiny claim-pick-file">Judge this one against a file…
+        <input type="file" hidden
+               accept=".pdf,.txt,.text,.md,application/pdf,text/plain">
+      </label>
+      <p class="claim-status" hidden></p>
     </div>`;
+
+  /* What the last re-check of *this* citation did. The card carries its own
+     "last re-checked" line, but that one is about the reference — and after a
+     single-citation re-check it would say the whole thing was re-run, which is
+     the misreading this feature exists to remove. */
+  const done = claim.rechecked
+    ? `<p class="claim-was">Citation re-checked ${esc(claim.rechecked.at || "")}${
+        claim.rechecked.against === "supplied"
+          ? ` against <b>${esc(claim.rechecked.filename || "a supplied file")}</b>`
+          : " against the citation indexes"}.${
+        claim.rechecked.cleared_review
+          ? " Your own verdict on it was cleared — it judged the evidence this replaced."
+          : ""}</p>`
+    : "";
 
   return `
     <div class="claim ${esc(verdict)}${claim.override ? " mine" : ""}">
@@ -737,6 +907,7 @@ function claimHtml(claim, paperUrl, key, index) {
              — ${esc(truncate(claim.machine_reason || "", 260))}</p>` : ""}
       ${claim.evidence_quote
         ? `<p class="verbatim">“${esc(truncate(claim.evidence_quote, 400))}”</p>` : ""}
+      ${done}
       ${controls}
     </div>`;
 }

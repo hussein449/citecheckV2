@@ -239,6 +239,9 @@ def recheck(run_id: str):
     Synchronous rather than streamed: this is one reference, it takes seconds
     rather than minutes, and the caller has a single card to update. Streaming
     it would mean a second event log for a job with one step in it.
+
+    A `claim_index` narrows it to one citation of that reference — one lookup,
+    one model call, and the sibling verdicts on the card left alone.
     """
     if not _RUN_ID.fullmatch(run_id):
         abort(404)
@@ -249,6 +252,15 @@ def recheck(run_id: str):
     key = (request.form.get("key") or "").strip()
     if not key:
         return jsonify({"error": "No reference was named."}), 400
+
+    # Absent means "re-check the whole reference"; a number picks one of the
+    # citations judged inside it. Parsed exactly as /api/verdict parses it, so
+    # the two per-citation actions cannot disagree about what an index means.
+    raw_index = (request.form.get("claim_index") or "").strip()
+    try:
+        claim_index = int(raw_index) if raw_index else None
+    except ValueError:
+        return jsonify({"error": f"{raw_index!r} is not a citation number."}), 400
 
     supplied = None
     uploaded = request.files.get("source")
@@ -275,6 +287,7 @@ def recheck(run_id: str):
                 options,
                 paper_path=str(papers[0]) if papers else "",
                 supplied=supplied,
+                claim_index=claim_index,
             )
     except KeyError:
         return jsonify({"error": f"Reference {key} is not in this report."}), 404
@@ -365,9 +378,15 @@ def report(run_id: str):
         return jsonify(state["report"])
 
     path = RUNS_DIR / run_id / "report.json"
-    if path.exists():
-        return Response(path.read_text(encoding="utf-8"), mimetype="application/json")
-    abort(404)
+    if not path.exists():
+        abort(404)
+
+    # Re-derived on the way out rather than served verbatim. Everything
+    # `summarise` computes is a function of the entries, so this changes nothing
+    # for a report written by the current code — but a report written by an
+    # older one is missing whatever the tally has learned to count since, and
+    # would otherwise show a summary that disagrees with its own cards for ever.
+    return jsonify(pipeline.summarise(json.loads(path.read_text(encoding="utf-8"))))
 
 
 @app.get("/api/paper/<run_id>")

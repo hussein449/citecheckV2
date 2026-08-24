@@ -50,6 +50,17 @@ _CONCERN = {
 }
 
 
+def concern(verdict: str) -> int:
+    """How much *verdict* demands a human look.
+
+    Exposed because callers that hold stored report dicts rather than
+    `ClaimVerdict` objects still have to order verdicts by the same scale, and
+    a second ordering defined somewhere else is one that will drift from this
+    one the first time a verdict is added.
+    """
+    return _CONCERN.get(verdict, 0)
+
+
 def most_concerning(verdicts) -> str:
     """The verdict among *verdicts* that most demands a human look."""
     return max(verdicts, key=lambda v: _CONCERN.get(v, 0), default="unverified")
@@ -519,6 +530,59 @@ def llm_available() -> bool:
     return active_engine() != "lexical"
 
 
+# Judging the same citation twice has to give the same answer. At the API's
+# default temperature it does not: the identical claim against the identical
+# source text comes back "related" on one call and "weak" on the next, and to
+# anyone watching the report that is the tool changing its mind for no reason
+# they can see. It is what makes a re-check look broken. Nothing about reading a
+# citation is a creative task, so sampling is pinned off and the seed fixed.
+_SAMPLING = {"temperature": 0, "top_p": 1, "seed": 20240516}
+
+
+def _complete(client, model: str, prompt: str):
+    """One judging call, with sampling pinned wherever the model allows it.
+
+    The model is configurable, and reasoning models reject `temperature`
+    outright rather than ignoring it. A rejection falls back to a plain call —
+    losing determinism is bad, but failing the reference over it is worse.
+    """
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _JUDGE_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "citation_verdict",
+                "strict": True,
+                "schema": _JUDGE_SCHEMA,
+            },
+        },
+    }
+    try:
+        return client.chat.completions.create(**body, **_SAMPLING)
+    except Exception as exc:
+        if not _rejects_sampling(exc):
+            raise
+        return client.chat.completions.create(**body)
+
+
+def _rejects_sampling(exc: Exception) -> bool:
+    """Whether *exc* is the API refusing a sampling parameter, not a real failure.
+
+    Matched on the message because the SDK raises the same BadRequestError for
+    an unsupported parameter as it does for a malformed schema, and retrying a
+    malformed schema without temperature would just fail again more slowly.
+    """
+    text = str(exc).lower()
+    named = any(p in text for p in ("temperature", "top_p", "seed"))
+    return named and any(
+        m in text for m in ("unsupported", "not supported", "unrecognized", "does not support")
+    )
+
+
 def openai_match(
     claim: "str | Claim",
     source_text: str,
@@ -549,21 +613,7 @@ def openai_match(
 
     try:
         client = openai.OpenAI(base_url=os.environ.get("OPENAI_BASE_URL") or None)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _JUDGE_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "citation_verdict",
-                    "strict": True,
-                    "schema": _JUDGE_SCHEMA,
-                },
-            },
-        )
+        response = _complete(client, model, prompt)
     except Exception as exc:
         return MatchResult(
             engine="openai-error",
@@ -601,6 +651,14 @@ def _result_from_payload(data: dict, engine: str) -> MatchResult:
         # step will treat the verbatim quote as a highlight target.
         best_passage=Passage(text=quote, score=1.0, offset=0) if quote else None,
     )
+
+
+_UNJUDGED_REASON = (
+    "This citing sentence could not be judged — the retrieved text was too thin "
+    "to settle it, or the judging call did not come back. It is counted as "
+    "unverified rather than dropped, so the reference's headline does not move "
+    "depending on which calls happened to succeed."
+)
 
 
 # Verdicts that accuse the citing author of something, and so are not allowed
@@ -677,21 +735,21 @@ def judge(
 
     capped = claim_list[:max_claims]
 
-    judged: list[tuple[Claim, MatchResult]] = []
+    # Indexed alongside `capped`, so a claim the model could not judge keeps its
+    # place instead of vanishing. See below for why that matters.
+    outcomes: list[MatchResult | None] = []
     failure: MatchResult | None = None
     reconsidered: set[int] = set()
-    for claim in capped:
+    for index, claim in enumerate(capped):
         result = openai_match(
             claim, source_text, title=title, reference_line=reference_line,
             abstract=abstract,
         )
-        if result is None:
-            continue
-        if "-" in result.engine:          # "<engine>-error" / "-refusal"
+        if result is not None and "-" in result.engine:   # "<engine>-error" / "-refusal"
             failure = result
-            continue
+            result = None
 
-        if result.verdict in _NEEDS_CONFIRMING:
+        if result is not None and result.verdict in _NEEDS_CONFIRMING:
             again = _second_look(claim, abstract, source_text, title, reference_line)
             if (
                 again is not None
@@ -704,38 +762,46 @@ def judge(
                     "covers the claim more directly.)"
                 )
                 result = again
-                reconsidered.add(len(judged))
+                reconsidered.add(index)
 
-        judged.append((claim, result))
+        outcomes.append(result)
 
     # Nothing usable came back: the lexical verdict stands, with the reason why.
-    if not judged:
+    if not any(outcomes):
         if failure is not None:
             lexical.reason = f"{lexical.reason} {failure.reason}".strip()
         return lexical
 
+    # A claim the model could not return on still happened, and the headline is
+    # the most concerning claim beneath it. Dropping the unjudged ones would let
+    # the headline depend on how many calls came back rather than on what the
+    # source says — the same reference judged twice reading "unrelated" once and
+    # "related" the next time, because on the second run the claim that scored
+    # worst was the one whose call failed. They are kept, as what they are.
     per_claim = [
         ClaimVerdict(
             claim=claim.text,
-            verdict=result.verdict,
-            score=round(result.score, 3),
-            reason=result.reason,
-            evidence_quote=result.best_passage.text if result.best_passage else "",
+            verdict=result.verdict if result else "unverified",
+            score=round(result.score, 3) if result else 0.0,
+            reason=result.reason if result else _UNJUDGED_REASON,
+            evidence_quote=(
+                result.best_passage.text if result and result.best_passage else ""
+            ),
             page=claim.page,
             context=claim.context if claim.context != claim.text else "",
             reconsidered=index in reconsidered,
         )
-        for index, (claim, result) in enumerate(judged)
+        for index, (claim, result) in enumerate(zip(capped, outcomes))
     ]
 
-    worst_claim, worst = max(judged, key=lambda row: _CONCERN.get(row[1].verdict, 0))
+    worst = max(per_claim, key=lambda c: _CONCERN.get(c.verdict, 0))
     out = MatchResult(
-        engine=worst.engine,
+        engine=next(r.engine for r in outcomes if r is not None),
         verdict=worst.verdict,
         score=worst.score,
-        reason=_rollup_reason(worst, per_claim, len(claim_list), len(capped)),
+        reason=_rollup_reason(worst.reason, per_claim, len(claim_list), len(capped)),
         claim_verdicts=per_claim,
-        matched_claim=worst_claim.text,
+        matched_claim=worst.claim,
     )
 
     # Keep the lexical passages — they carry the page offsets the screenshot
@@ -753,13 +819,12 @@ def judge(
 
 
 def _rollup_reason(
-    worst: MatchResult,
+    reason: str,
     per_claim: list[ClaimVerdict],
     total_claims: int,
     judged_claims: int,
 ) -> str:
     """Explain the headline verdict without hiding the claims that were fine."""
-    reason = worst.reason
     if len(per_claim) <= 1:
         base = reason
     else:
