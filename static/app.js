@@ -385,7 +385,15 @@ const CONCERN = { not_found: 6, unrelated: 5, weak: 4, unverified: 3, related: 2
    should have been cited at all, and ranking on verdict alone buries it under
    references we merely could not read. */
 function urgency(entry) {
-  let score = CONCERN[entry.verdict] || 0;
+  /* Ranked on the most concerning citation the card holds, not on its headline.
+     The headline is a roll-up, and the lexical tier rolls up to the *best* case
+     — so a card holding one unverified citation and one supported one headlines
+     "supported" and would sort to the very bottom, below cards with nothing
+     wrong with them. What needs a human look is the unverified citation, and it
+     is still there whatever the headline says. */
+  let score = Math.max(
+    0, ...[...verdictsIn(entry)].map((v) => CONCERN[v] || 0)
+  );
   if (entry.source?.retracted) score = Math.max(score, 6.5);
   else if ((entry.flags || []).some((f) => f.severity === "high")) score = Math.max(score, 4.5);
   return score;
@@ -693,19 +701,32 @@ function cardHtml(entry) {
   ].join("");
 
   /* What this reference's citations actually came to, on the head where it is
-     readable without opening the card. The headline badge beside it is only the
-     most concerning of these, and on a reference cited five times that single
-     badge is what makes four supported citations look like they do not exist. */
+     readable without opening the card. */
   const perClaim = entry.claim_verdicts || [];
+  const spread = VERDICTS
+    .map((v) => [v, perClaim.filter((c) => c.verdict === v).length])
+    .filter(([, n]) => n);
   const breakdown = perClaim.length > 1
-    ? `<div class="card-tally">${VERDICTS
-        .map((v) => [v, perClaim.filter((c) => c.verdict === v).length])
-        .filter(([, n]) => n)
+    ? `<div class="card-tally">${spread
         .map(([v, n]) => `<span class="pip ${v}${
           v === activeFilter ? " lit" : ""
         }">${n} ${esc(VERDICT_LABEL[v])}</span>`)
         .join("")}</div>`
     : "";
+
+  /* A card whose citations disagree does not get to wear one of their verdicts
+     as though it were the card's answer. Which one it wore depended on the
+     engine — the model tier rolls up to the worst citation, the lexical tier to
+     the best — so the same mixed card read "Unverified" or "Supported"
+     depending on how it was judged, and either way the citations it did not
+     name looked like they did not exist. The badge says the citations disagree
+     and the pips beside it say how; the roll-up is still on the card, in the
+     verdict section, where it is labelled as a summary. */
+  const mixed = spread.length > 1 && !entry.reviewed;
+  const headBadge = mixed
+    ? `<span class="badge mixed" title="This reference is cited ${perClaim.length} times and the citations were judged differently">Mixed</span>`
+    : `<span class="badge ${esc(entry.verdict)}">${
+        esc(VERDICT_LABEL[entry.verdict] || entry.verdict)}</span>`;
 
   /* Evidence images are written back to the same filenames on a re-check, so
      the browser would keep serving the pre-recheck capture from cache. */
@@ -791,7 +812,7 @@ function cardHtml(entry) {
   <article class="card${openKeys.has(entry.key) ? " open" : ""}" data-key="${esc(entry.key)}">
     <div class="card-head">
       <span class="card-num">${esc(label)}</span>
-      <span class="badge ${esc(entry.verdict)}">${esc(VERDICT_LABEL[entry.verdict] || entry.verdict)}</span>
+      ${headBadge}
       <div class="card-title">
         <h3>${esc(title)}${chips}</h3>
         <div class="sub">${esc(truncate(entry.reason || "", 180))}</div>
@@ -801,6 +822,10 @@ function cardHtml(entry) {
     </div>
     <div class="card-body">
       <div class="section"><h4>Verdict</h4>
+        ${mixed ? `<p class="rollup-note">Rolled up across ${perClaim.length}
+           citations this reads <b>${esc(VERDICT_LABEL[entry.verdict] || entry.verdict)}</b>,
+           but they were judged separately and did not agree — each one is listed
+           below with its own verdict.</p>` : ""}
         <p class="reason">${esc(entry.reason || "No explanation available.")}</p>
         ${entry.reviewed ? `<p class="reason machine-said"><span>What the tool found:</span>
            ${esc(VERDICT_LABEL[entry.reviewed.machine_verdict] || entry.reviewed.machine_verdict || "—")}

@@ -458,6 +458,19 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 /* The card's own breakdown, on the head so it reads without opening the card.
    Deliberately smaller and quieter than the headline badge beside it: it is the
    detail behind that badge, not a competing verdict. */
+/* The badge a card wears when its citations disagree. Deliberately neutral —
+   it is not a seventh verdict, it is the card declining to speak for citations
+   that gave different answers, and the pips beneath it carry the detail. */
+.badge.mixed {
+  background: var(--surface-2); color: var(--ink-2);
+  border: 1px dashed var(--line-strong);
+}
+.rollup-note {
+  margin: 0 0 8px; padding: 8px 11px; border-radius: 6px; font-size: 12.6px;
+  line-height: 1.55; background: var(--surface-2); color: var(--ink-dim);
+  border-left: 3px solid var(--line-strong);
+}
+.rollup-note b { color: var(--ink-2); }
 .card-tally { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
 .pip {
   font-size: 10.5px; font-weight: 600; letter-spacing: .03em;

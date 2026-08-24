@@ -171,6 +171,82 @@ class SectionsOverlapTest(unittest.TestCase):
         self.assertEqual(pipeline.verdicts_in(entry), {"weak", "supported"})
 
 
+class MixedCardCountsTest(unittest.TestCase):
+    """Reference 109: two citations, both unverified, one re-checked to supported.
+
+    The reported case. What made it look like the counts were stuck is that the
+    card wore one verdict for two citations that disagreed — and which verdict it
+    wore depended on the engine, because the model tier rolls up to the worst
+    citation and the lexical tier to the best. The headline count therefore moved
+    for one of them and not the other, while the citation counts moved for both.
+    """
+
+    def setUp(self):
+        self.before = pipeline.summarise(_report([
+            _entry("109", "unverified", ["unverified", "unverified"]),
+            _entry("7", "supported", ["supported"]),
+            _entry("8", "related", ["related"]),
+        ]))
+        self.after = pipeline.summarise(_report([
+            _entry("109", "unverified", ["unverified", "supported"]),
+            _entry("7", "supported", ["supported"]),
+            _entry("8", "related", ["related"]),
+        ]))
+
+    def test_the_supported_citation_count_goes_up(self):
+        self.assertEqual(self.before["stats"]["claim_verdicts"]["supported"], 1)
+        self.assertEqual(self.after["stats"]["claim_verdicts"]["supported"], 2)
+
+    def test_the_unverified_citation_count_goes_down(self):
+        self.assertEqual(self.before["stats"]["claim_verdicts"]["unverified"], 2)
+        self.assertEqual(self.after["stats"]["claim_verdicts"]["unverified"], 1)
+
+    def test_the_card_joins_the_supported_section(self):
+        self.assertEqual(self.before["stats"]["references_with"]["supported"], 1)
+        self.assertEqual(self.after["stats"]["references_with"]["supported"], 2)
+
+    def test_and_stays_in_the_unverified_one(self):
+        """It still holds an unverified citation, so it is still a card there."""
+        self.assertEqual(self.after["stats"]["references_with"]["unverified"], 1)
+        self.assertIn("109", [
+            e["key"] for e in self.after["references"]
+            if "unverified" in pipeline.verdicts_in(e)
+        ])
+
+    def test_the_headline_count_is_the_one_that_does_not_move(self):
+        """Which is why it must not be the number the reader is shown."""
+        self.assertEqual(self.before["stats"]["verdicts"]["supported"], 1)
+        self.assertEqual(self.after["stats"]["verdicts"]["supported"], 1)
+
+    def test_a_mixed_card_is_reachable_from_both_sections(self):
+        entry = self.after["references"][0]
+        self.assertEqual(pipeline.verdicts_in(entry), {"unverified", "supported"})
+
+
+class MixedRollUpDependsOnEngineTest(unittest.TestCase):
+    """The same mixed card headlines differently under the two tiers.
+
+    Not a bug in either rule — the model tier will not let one bad citation be
+    cancelled by good ones, and the lexical tier will not let low word overlap
+    accuse anybody. It is a reason the headline cannot be presented as the
+    card's verdict when the citations disagree.
+    """
+
+    MIXED = ["unverified", "supported"]
+
+    def test_the_model_tier_rolls_up_to_the_worst(self):
+        self.assertEqual(match.roll_up(self.MIXED, "openai"), "unverified")
+
+    def test_the_lexical_tier_rolls_up_to_the_best(self):
+        self.assertEqual(match.roll_up(self.MIXED, "lexical"), "supported")
+
+    def test_so_the_headline_alone_never_names_both(self):
+        headlines = {match.roll_up(self.MIXED, e) for e in ("openai", "lexical")}
+        self.assertEqual(len(headlines), 2)
+        for headline in headlines:
+            self.assertNotEqual(set(self.MIXED), {headline})
+
+
 # --------------------------------------------------------------------------- #
 # Rolling up
 # --------------------------------------------------------------------------- #
