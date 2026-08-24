@@ -330,6 +330,10 @@ def summarise(report: dict) -> dict:
     # counts here deliberately sum to more than the number of references.
     containing: dict[str, int] = {}
     derived: list[str] = []
+    # Findings the reader has already dealt with. Kept, because a retraction
+    # does not stop being true when someone reads it — but moved below the
+    # outstanding ones, so this box works as a list of what is left.
+    settled: list[str] = []
     flagged = retracted = not_found = claims_judged = rechecked = reviewed = 0
     claims_reviewed = 0
 
@@ -356,7 +360,10 @@ def summarise(report: dict) -> dict:
         for flag in entry.get("flags", []):
             if flag["severity"] == "high":
                 flagged += 1
-                derived.append(f"[{entry['key']}] {flag['message']}")
+                handled = _addressed(entry)
+                (settled if handled else derived).append(
+                    f"[{entry['key']}] {flag['message']}{handled}"
+                )
                 break
 
     stats["verdicts"] = verdicts
@@ -372,8 +379,42 @@ def summarise(report: dict) -> dict:
     stats.update(_engine_outcome(references, stats, derived))
     stats["risk"] = risk_summary(stats)
 
-    report["warnings"] = list(dict.fromkeys(base + derived))
+    report["warnings"] = list(dict.fromkeys(base + derived + settled))
     return report
+
+
+def _addressed(entry: dict) -> str:
+    """How the reader has already dealt with the reference a warning is about.
+
+    A finding does not stop being true because somebody looked at it — a
+    retracted paper is still retracted, and a reference no index has heard of is
+    still missing — so the warning stays. But a reader working down this list
+    needs to see which lines they have already handled. Without it the box reads
+    exactly the same after an hour of re-checking as it did before any, there is
+    no way to tell an outstanding item from a settled one, and the only way to
+    find out is to open every card named in it and remember what you did.
+    """
+    reviewed = entry.get("reviewed") or {}
+    if reviewed.get("verdict"):
+        return f" — you have since judged this “{reviewed['verdict']}” yourself."
+
+    done = entry.get("rechecked") or {}
+    if not done:
+        return ""
+    if done.get("outcome") == "nothing_retrieved":
+        return " — re-checked since, but nothing could be retrieved."
+    scope = (
+        f"citation {done['claim_index'] + 1} of this"
+        if done.get("scope") == "claim" and done.get("claim_index") is not None
+        else "this"
+    )
+    against = (
+        f"a document you supplied ({done['filename']})"
+        if done.get("against") == "supplied" and done.get("filename")
+        else "a document you supplied" if done.get("against") == "supplied"
+        else "the citation indexes"
+    )
+    return f" — you have since re-checked {scope} against {against}."
 
 
 def verdicts_in(entry: dict) -> set[str]:

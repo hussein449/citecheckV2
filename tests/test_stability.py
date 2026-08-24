@@ -338,6 +338,63 @@ class WarningsFollowTheEntriesTest(unittest.TestCase):
         ])
         self.assertEqual(report["warnings"], ["No bibliography heading was found."])
 
+    def test_a_finding_the_reader_handled_says_so(self):
+        """It is still true, so it stays — but not looking identical to one
+        nobody has touched, or an hour of re-checking leaves the box unchanged."""
+        report = self.report_with([
+            {**_entry("106", "supported", ["supported"]), "flags": self.FLAG,
+             "reviewed": {"verdict": "supported", "source": "reference"}},
+        ])
+        line = next(w for w in report["warnings"] if w.startswith("[106]"))
+        self.assertIn("This work was RETRACTED.", line)
+        self.assertIn("you have since judged this", line)
+        self.assertIn("supported", line)
+
+    def test_a_re_check_against_a_supplied_file_is_named(self):
+        report = self.report_with([
+            {**_entry("106", "supported", ["supported"]), "flags": self.FLAG,
+             "rechecked": {"against": "supplied", "filename": "bosona.pdf",
+                           "outcome": "judged", "at": "now"}},
+        ])
+        line = next(w for w in report["warnings"] if w.startswith("[106]"))
+        self.assertIn("re-checked this against a document you supplied", line)
+        self.assertIn("bosona.pdf", line)
+
+    def test_a_single_citation_re_check_says_which_citation(self):
+        report = self.report_with([
+            {**_entry("106", "supported", ["supported", "supported"]),
+             "flags": self.FLAG,
+             "rechecked": {"against": "sources", "outcome": "judged",
+                           "scope": "claim", "claim_index": 1, "at": "now"}},
+        ])
+        line = next(w for w in report["warnings"] if w.startswith("[106]"))
+        self.assertIn("re-checked citation 2 of this", line)
+
+    def test_a_re_check_that_retrieved_nothing_is_not_called_handled(self):
+        report = self.report_with([
+            {**_entry("106", "unverified", ["unverified"]), "flags": self.FLAG,
+             "rechecked": {"against": "sources", "outcome": "nothing_retrieved",
+                           "detail": "down", "at": "now"}},
+        ])
+        line = next(w for w in report["warnings"] if w.startswith("[106]"))
+        self.assertIn("nothing could be retrieved", line)
+
+    def test_untouched_findings_come_before_handled_ones(self):
+        """The box has to work as a list of what is left."""
+        report = self.report_with([
+            {**_entry("1", "supported", ["supported"]), "flags": self.FLAG,
+             "reviewed": {"verdict": "supported", "source": "reference"}},
+            {**_entry("2", "unverified", ["unverified"]), "flags": self.FLAG},
+        ])
+        keys = [w[:4] for w in report["warnings"] if w.startswith("[")]
+        self.assertEqual(keys, ["[2] ", "[1] "])
+
+    def test_an_untouched_finding_is_left_exactly_as_it_was(self):
+        report = self.report_with([
+            {**_entry("106", "unverified", ["unverified"]), "flags": self.FLAG},
+        ])
+        self.assertIn("[106] This work was RETRACTED.", report["warnings"])
+
     def test_the_parse_warning_survives_both(self):
         """It describes reading the PDF, which no re-check re-does."""
         for entries in (
