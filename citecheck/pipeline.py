@@ -336,8 +336,20 @@ def summarise(report: dict) -> dict:
     settled: list[str] = []
     flagged = retracted = not_found = claims_judged = rechecked = reviewed = 0
     claims_reviewed = 0
+    # The same findings, minus the ones the reader has already been through.
+    # These are what decide the banner: a finding somebody has opened, read and
+    # ruled on is not still asking them to do something about it.
+    flagged_open = retracted_open = 0
 
     for entry in references:
+        # Two different questions. `note` is what the reader has done to this
+        # reference at all, which is worth saying on the warning line. `resolved`
+        # is whether a *person* has ruled on it — and only that settles a
+        # finding. Re-checking a retracted paper against its own text judges the
+        # citation; it does not decide whether citing a retracted work is
+        # acceptable, which is a call only a human makes.
+        note = _addressed(entry)
+        resolved = bool((entry.get("reviewed") or {}).get("verdict"))
         verdicts[entry["verdict"]] = verdicts.get(entry["verdict"], 0) + 1
         for claim in entry.get("claim_verdicts") or []:
             claim_verdicts[claim["verdict"]] = claim_verdicts.get(claim["verdict"], 0) + 1
@@ -346,6 +358,8 @@ def summarise(report: dict) -> dict:
         claims_judged += len(entry.get("claim_verdicts") or [])
         if (entry.get("source") or {}).get("retracted"):
             retracted += 1
+            if not resolved:
+                retracted_open += 1
         if entry["verdict"] == "not_found":
             not_found += 1
         if entry.get("rechecked"):
@@ -360,17 +374,23 @@ def summarise(report: dict) -> dict:
         for flag in entry.get("flags", []):
             if flag["severity"] == "high":
                 flagged += 1
-                handled = _addressed(entry)
-                (settled if handled else derived).append(
-                    f"[{entry['key']}] {flag['message']}{handled}"
+                if not resolved:
+                    flagged_open += 1
+                (settled if resolved else derived).append(
+                    f"[{entry['key']}] {flag['message']}{note}"
                 )
                 break
 
     stats["verdicts"] = verdicts
     stats["claim_verdicts"] = claim_verdicts
     stats["references_with"] = containing
+    # Totals, because the tally tile and the exported report must keep showing
+    # a retraction whoever has read it. The `_open` pair is what the banner
+    # asks, which is a different question: what is still waiting on somebody.
     stats["flagged"] = flagged
+    stats["flagged_open"] = flagged_open
     stats["retracted"] = retracted
+    stats["retracted_open"] = retracted_open
     stats["not_found"] = not_found
     stats["claims_judged"] = claims_judged
     stats["rechecked"] = rechecked
@@ -379,7 +399,22 @@ def summarise(report: dict) -> dict:
     stats.update(_engine_outcome(references, stats, derived))
     stats["risk"] = risk_summary(stats)
 
-    report["warnings"] = list(dict.fromkeys(base + derived + settled))
+    # `warnings` stays a flat list of strings: it is what `report.json` has
+    # always held and what anything reading a saved report expects. The paired
+    # list says which of them are still outstanding, so the box can show a
+    # finding as settled instead of just carrying a longer sentence.
+    items: list[dict] = []
+    seen: set[str] = set()
+    for text, addressed in (
+        [(t, False) for t in base + derived] + [(t, True) for t in settled]
+    ):
+        if text in seen:
+            continue
+        seen.add(text)
+        items.append({"text": text, "addressed": addressed})
+
+    report["warning_items"] = items
+    report["warnings"] = [item["text"] for item in items]
     return report
 
 
@@ -553,11 +588,22 @@ def risk_summary(stats: dict) -> dict:
     level = "clear"
 
     for key, rule_level, singular, plural in _RISK_RULES:
-        count = stats.get(key, 0)
-        if not count:
-            continue
-        level = rule_level
-        headlines.append((singular if count == 1 else plural).format(n=count))
+        # What is still waiting on somebody drives the headline. A finding the
+        # reader has opened, read and ruled on is reported after it and does not
+        # set the level — but it is never dropped, because the paper is still
+        # retracted and whoever receives the exported report was not in the room
+        # when that call was made.
+        total = stats.get(key, 0)
+        open_count = stats.get(f"{key}_open", total)
+        if open_count:
+            level = rule_level
+            headlines.append((singular if open_count == 1 else plural).format(n=open_count))
+        settled_count = total - open_count
+        if settled_count:
+            headlines.append(
+                (singular if settled_count == 1 else plural).format(n=settled_count)
+                + ", which you have reviewed"
+            )
 
     misrepresented = verdicts.get("unrelated", 0) + verdicts.get("weak", 0)
     if misrepresented:
@@ -567,13 +613,19 @@ def risk_summary(stats: dict) -> dict:
             "may not say what they are cited for"
         )
 
-    high_flags = stats.get("flagged", 0)
+    high_flags = stats.get("flagged_open", stats.get("flagged", 0))
     if high_flags and level == "clear":
         level = "concern"
     if high_flags:
         headlines.append(
             f"{high_flags} reference carries a high-severity flag" if high_flags == 1
             else f"{high_flags} references carry a high-severity flag"
+        )
+    settled_flags = stats.get("flagged", 0) - high_flags
+    if settled_flags:
+        headlines.append(
+            f"{settled_flags} flagged reference you have reviewed" if settled_flags == 1
+            else f"{settled_flags} flagged references you have reviewed"
         )
 
     unverified = verdicts.get("unverified", 0)

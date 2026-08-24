@@ -311,6 +311,54 @@ class RiskBannerCountsCitationsTest(unittest.TestCase):
         self.assertEqual(stats["risk"]["level"], "critical")
 
 
+class FindingsResolveTest(unittest.TestCase):
+    """A finding somebody has ruled on stops driving the banner, without vanishing.
+
+    Both halves matter. It has to stop counting, or the banner reads the same
+    after an afternoon's review as it did before any of it. And it has to stay
+    on the report, because marking a retraction "supported" does not un-retract
+    the paper and whoever receives the exported PDF was not in the room.
+    """
+
+    FLAG = [{"kind": "retracted-source", "severity": "high",
+             "message": "This work was RETRACTED."}]
+
+    def stats_for(self, reviewed: bool):
+        entry = {**_entry("106", "supported", ["supported"]),
+                 "flags": self.FLAG, "source": {"retracted": True}}
+        if reviewed:
+            entry["reviewed"] = {"verdict": "supported", "source": "reference"}
+        return pipeline.summarise(_report([entry]))["stats"]
+
+    def test_an_open_finding_is_critical(self):
+        self.assertEqual(self.stats_for(reviewed=False)["risk"]["level"], "critical")
+
+    def test_reviewing_it_stops_it_driving_the_level(self):
+        self.assertNotEqual(self.stats_for(reviewed=True)["risk"]["level"], "critical")
+
+    def test_the_finding_is_still_reported(self):
+        headlines = self.stats_for(reviewed=True)["risk"]["headlines"]
+        self.assertTrue(any("retracted" in h for h in headlines))
+        self.assertTrue(any("you have reviewed" in h for h in headlines))
+
+    def test_the_totals_are_untouched_so_the_tile_still_shows_it(self):
+        stats = self.stats_for(reviewed=True)
+        self.assertEqual(stats["retracted"], 1)
+        self.assertEqual(stats["retracted_open"], 0)
+        self.assertEqual(stats["flagged"], 1)
+        self.assertEqual(stats["flagged_open"], 0)
+
+    def test_a_re_check_alone_does_not_resolve_it(self):
+        """The tool ran again; nobody decided whether citing it is acceptable."""
+        entry = {**_entry("106", "supported", ["supported"]),
+                 "flags": self.FLAG, "source": {"retracted": True},
+                 "rechecked": {"against": "supplied", "filename": "x.pdf",
+                               "outcome": "judged", "at": "now"}}
+        stats = pipeline.summarise(_report([entry]))["stats"]
+        self.assertEqual(stats["risk"]["level"], "critical")
+        self.assertEqual(stats["retracted_open"], 1)
+
+
 class WarningsFollowTheEntriesTest(unittest.TestCase):
     """"Worth knowing" holds structural findings, and drops them when they go."""
 
@@ -394,6 +442,30 @@ class WarningsFollowTheEntriesTest(unittest.TestCase):
             {**_entry("106", "unverified", ["unverified"]), "flags": self.FLAG},
         ])
         self.assertIn("[106] This work was RETRACTED.", report["warnings"])
+
+    def test_a_reviewed_finding_is_marked_resolved(self):
+        report = self.report_with([
+            {**_entry("106", "supported", ["supported"]), "flags": self.FLAG,
+             "reviewed": {"verdict": "supported", "source": "reference"}},
+        ])
+        item = next(i for i in report["warning_items"] if i["text"].startswith("[106]"))
+        self.assertTrue(item["addressed"])
+
+    def test_an_untouched_finding_is_not(self):
+        report = self.report_with([
+            {**_entry("106", "unverified", ["unverified"]), "flags": self.FLAG},
+        ])
+        item = next(i for i in report["warning_items"] if i["text"].startswith("[106]"))
+        self.assertFalse(item["addressed"])
+
+    def test_the_flat_list_still_carries_every_finding(self):
+        """`report.json` has always held strings, and readers of it expect them."""
+        report = self.report_with([
+            {**_entry("106", "supported", ["supported"]), "flags": self.FLAG,
+             "reviewed": {"verdict": "supported", "source": "reference"}},
+        ])
+        self.assertEqual(report["warnings"],
+                         [i["text"] for i in report["warning_items"]])
 
     def test_the_parse_warning_survives_both(self):
         """It describes reading the PDF, which no re-check re-does."""
