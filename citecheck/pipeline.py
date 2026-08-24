@@ -467,8 +467,24 @@ def risk_summary(stats: dict) -> dict:
     derive a summary for a run that predates this field, instead of defaulting
     to "clear" and telling a client everything is fine when it is not.
     """
-    verdicts = stats.get("verdicts", {})
-    checked = max(1, stats.get("references_checked", 0))
+    # Counted from the citations, not from the reference headlines. A headline
+    # is a roll-up of several citations and the two tiers roll it up in opposite
+    # directions, so a reference cited twice — once unrelated, once supported —
+    # headlines "supported" under lexical judging and the unrelated citation
+    # disappears from this banner entirely. That put a green "No integrity
+    # problems were found" on top of a report holding citations that do not say
+    # what they are cited for, which is the one sentence a reader acts on and
+    # the one failure they cannot detect. It also meant the banner never moved
+    # when a re-check changed a citation, because it was not reading citations.
+    #
+    # Reports written before per-citation verdicts existed have no such data, so
+    # they keep the old reference-level reading rather than silently reporting
+    # zero — and the prose below names whichever one it is actually counting.
+    citations = stats.get("claim_verdicts") or {}
+    verdicts = citations or stats.get("verdicts", {})
+    noun = "citation" if citations else "reference"
+    checked = max(1, (stats.get("claims_judged", 0) if citations
+                      else stats.get("references_checked", 0)))
 
     # A run that checked nothing has found nothing, which is not the same as
     # having found nothing wrong. Falling through to "clear" here puts a green
@@ -506,7 +522,7 @@ def risk_summary(stats: dict) -> dict:
     if misrepresented:
         level = "critical" if level == "critical" else "concern"
         headlines.append(
-            f"{misrepresented} citation{'s' if misrepresented != 1 else ''} "
+            f"{misrepresented} {noun}{'s' if misrepresented != 1 else ''} "
             "may not say what they are cited for"
         )
 
@@ -523,11 +539,13 @@ def risk_summary(stats: dict) -> dict:
     if unverified > checked * 0.4 and level == "clear":
         level = "review"
         headlines.append(
-            f"{unverified} of {checked} references could not be verified — mostly paywalls"
+            f"{unverified} of {checked} {noun}s could not be verified — mostly paywalls"
         )
 
     if not headlines:
-        headlines.append("No integrity problems were found in the references checked")
+        headlines.append(
+            f"No integrity problems were found in the {checked} {noun}s checked"
+        )
 
     # Said last, and said whatever the outcome. The banner is the one line a
     # reader acts on, and a report that reads "clear" because someone marked

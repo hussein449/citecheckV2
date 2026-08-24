@@ -247,6 +247,107 @@ class MixedRollUpDependsOnEngineTest(unittest.TestCase):
             self.assertNotEqual(set(self.MIXED), {headline})
 
 
+class RiskBannerCountsCitationsTest(unittest.TestCase):
+    """The banner reports what the citations say, not what the headlines do.
+
+    It calls them citations, so it has to count citations. Reading reference
+    headlines instead put a green "No integrity problems were found" on top of a
+    report holding an unrelated citation — the lexical tier rolls a reference up
+    to its *best* citation, so a reference cited twice, once unrelated and once
+    supported, headlines "supported" and takes its unrelated citation out of the
+    banner with it. It is the one line a reader acts on.
+    """
+
+    def flat(self, *entries):
+        return pipeline.summarise(_report(list(entries)))["stats"]["risk"]
+
+    def test_a_bad_citation_under_a_good_headline_still_reaches_the_banner(self):
+        risk = self.flat(
+            _entry("1", "supported", ["unrelated", "supported"]),
+            _entry("2", "supported", ["supported", "supported"]),
+        )
+        self.assertEqual(risk["level"], "concern")
+        self.assertIn("1 citation may not say what they are cited for",
+                      risk["headlines"])
+
+    def test_it_counts_every_such_citation_not_every_such_reference(self):
+        risk = self.flat(
+            _entry("1", "supported", ["unrelated", "weak", "supported"]),
+        )
+        self.assertIn("2 citations may not say what they are cited for",
+                      risk["headlines"])
+
+    def test_it_clears_once_the_citations_are_re_checked(self):
+        risk = self.flat(
+            _entry("1", "supported", ["supported", "supported"]),
+            _entry("2", "supported", ["supported"]),
+        )
+        self.assertEqual(risk["level"], "clear")
+
+    def test_it_moves_one_step_at_a_time_as_citations_are_fixed(self):
+        """What the reader watches after each re-check."""
+        two = self.flat(_entry("1", "supported", ["unrelated", "weak", "supported"]))
+        one = self.flat(_entry("1", "supported", ["supported", "weak", "supported"]))
+        none = self.flat(_entry("1", "supported", ["supported", "supported", "supported"]))
+        self.assertIn("2 citations may not say what they are cited for", two["headlines"])
+        self.assertIn("1 citation may not say what they are cited for", one["headlines"])
+        self.assertEqual(none["level"], "clear")
+
+    def test_an_older_report_keeps_its_reference_level_reading(self):
+        """No citation verdicts to count, so it must not silently report zero."""
+        risk = pipeline.risk_summary({
+            "references_checked": 4, "citations_found": 9, "references_parsed": 4,
+            "verdicts": {"unrelated": 2, "supported": 2},
+        })
+        self.assertEqual(risk["level"], "concern")
+        self.assertIn("2 references may not say what they are cited for",
+                      risk["headlines"])
+
+    def test_a_retraction_still_outranks_everything(self):
+        stats = pipeline.summarise(_report([
+            {**_entry("1", "supported", ["supported"]),
+             "source": {"retracted": True}},
+        ]))["stats"]
+        self.assertEqual(stats["risk"]["level"], "critical")
+
+
+class WarningsFollowTheEntriesTest(unittest.TestCase):
+    """"Worth knowing" holds structural findings, and drops them when they go."""
+
+    FLAG = [{"kind": "retracted-source", "severity": "high",
+             "message": "This work was RETRACTED."}]
+
+    def report_with(self, entries):
+        base = _report(entries)
+        base["base_warnings"] = ["No bibliography heading was found."]
+        return pipeline.summarise(base)
+
+    def test_a_flag_and_a_timeout_are_surfaced(self):
+        report = self.report_with([
+            {**_entry("106", "unverified", ["unverified"]), "flags": self.FLAG},
+            {**_entry("9", "unverified", ["unverified"]),
+             "timed_out": True, "notes": ["Timed out after 90s."]},
+        ])
+        self.assertIn("[106] This work was RETRACTED.", report["warnings"])
+        self.assertIn("[9] Timed out after 90s.", report["warnings"])
+
+    def test_they_disappear_once_a_re_check_clears_them(self):
+        report = self.report_with([
+            _entry("106", "supported", ["supported"]),
+            _entry("9", "supported", ["supported"]),
+        ])
+        self.assertEqual(report["warnings"], ["No bibliography heading was found."])
+
+    def test_the_parse_warning_survives_both(self):
+        """It describes reading the PDF, which no re-check re-does."""
+        for entries in (
+            [{**_entry("106", "unverified", ["unverified"]), "flags": self.FLAG}],
+            [_entry("106", "supported", ["supported"])],
+        ):
+            self.assertIn("No bibliography heading was found.",
+                          self.report_with(entries)["warnings"])
+
+
 # --------------------------------------------------------------------------- #
 # Rolling up
 # --------------------------------------------------------------------------- #
