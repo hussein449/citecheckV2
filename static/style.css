@@ -449,6 +449,30 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
   margin: 7px 0 0; font-size: 11.8px; color: var(--ink-dim); font-style: italic;
 }
 .claim.mine { border-left-width: 5px; background: var(--accent-soft); }
+/* The citations that put this card in the section being filtered. On a card of
+   five, one of them may be the reason it is here — pointing at which is the
+   difference between "this reference is unverified" and "this citation is". */
+.claim.lit {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+/* The card's own breakdown, on the head so it reads without opening the card.
+   Deliberately smaller and quieter than the headline badge beside it: it is the
+   detail behind that badge, not a competing verdict. */
+.card-tally { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
+.pip {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .03em;
+  padding: 2px 7px; border-radius: 999px;
+  border: 1px solid var(--line-strong); color: var(--ink-dim);
+  background: var(--surface);
+}
+.pip.supported { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
+.pip.related   { color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, var(--line)); }
+.pip.weak      { color: var(--mid); border-color: color-mix(in srgb, var(--mid) 35%, var(--line)); }
+.pip.unrelated, .pip.not_found { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
+.pip.unverified { color: var(--neutral); }
+/* The pip for the section currently being filtered, so the card says why it is
+   in front of the reader. */
+.pip.lit { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .revisited.yours { color: var(--accent); background: #fff; }
 .claim-machine {
   margin: 7px 0 0; padding: 7px 10px; border-radius: 6px; font-size: 12.2px;
@@ -609,6 +633,10 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
      all print. `.claim-actions` is hidden with the other controls above. */
   .claim-was { display: block !important; }
   .claim.mine { border-left-width: 5px; }
+  /* No filter exists on paper, so nothing is highlighted for being in one. The
+     per-card breakdown is a finding, not a control, and prints. */
+  .claim.lit { outline: 0; }
+  .pip.lit { background: none; border-color: var(--line-strong); color: var(--ink-dim); }
   .recheck { border: 0; padding: 0; background: none; }
   .recheck:not(:has(.recheck-was, .review-was)) { display: none !important; }
   .recheck > h4 { display: none; }

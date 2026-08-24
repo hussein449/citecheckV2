@@ -186,7 +186,7 @@ function refreshSummary() {
   renderRisk(s.risk);
   renderTally(s);
   renderWarnings(report.warnings);
-  renderFilters(s.verdicts || {}, report.references || []);
+  renderFilters(s.references_with || s.verdicts || {}, report.references || []);
 }
 
 /* Fold a single changed reference into the report the page is holding, without
@@ -231,7 +231,11 @@ function keepInPlace(key, rebuild) {
 function replaceCard(key) {
   const card = document.querySelector(`#cards .card[data-key="${key}"]`);
   const entry = (currentReport.references || []).find((r) => r.key === key);
-  if (!card || !entry) { renderCards(); return; }
+  // No fallback to `renderCards` here: rebuilding the list is what re-sorts it,
+  // and re-sorting under a reader who just edited one card is the thing this
+  // path exists to avoid. If the card is not on screen there is nothing to
+  // replace, and the next filter change will render it wherever it belongs.
+  if (!card || !entry) return;
   card.outerHTML = cardHtml(entry);
   bindCards(document.querySelector(`#cards .card[data-key="${key}"]`));
 }
@@ -271,13 +275,24 @@ function renderTally(stats) {
      supported citations spread across references that each headline as
      something worse. Filtering on the reference count alone drops that tile and
      the citations with it. */
+  const holding = stats.references_with || {};
   const tiles = VERDICTS.filter((v) => refs[v] || claims[v]).map((v) => {
-    const r = refs[v] || 0;
     const c = claims[v] || 0;
-    return `<div class="tile ${v}"><span class="n">${r}</span>
+    const inRefs = holding[v] ?? refs[v] ?? 0;
+    /* Leads with the citation count, because a citation is the thing that was
+       judged and the thing the sections below are built from. The reference
+       count underneath says how many cards to expect in that section — never
+       how many "are" that verdict, which was the number that read as wrong. */
+    /* "in N references" would read as a contradiction wherever the two numbers
+       cross — 31 unverified citations across 38 cards, because a reference the
+       tool never got citation-level verdicts for still carries the verdict on
+       its headline. So the second number is named as what it is: how many cards
+       this section holds, matching its filter button exactly. */
+    return `<div class="tile ${v}"><span class="n">${c || refs[v] || 0}</span>
               <span class="k">${esc(VERDICT_LABEL[v])}</span>
-              <span class="sub">${plural(r, "reference")}${
-                c ? ` · ${plural(c, "citation")}` : ""
+              <span class="sub">${
+                c ? `${plural(c, "citation")} · ${plural(inRefs, "card")}`
+                  : plural(inRefs, "card")
               }</span></div>`;
   });
   /* Retractions never show up as a verdict — a retracted paper can still
@@ -288,6 +303,8 @@ function renderTally(stats) {
                      <span class="k">Retracted</span>
                      <span class="sub">${plural(stats.retracted, "reference")}</span></div>`);
   }
+  /* Retraction is a property of the work, not of any one citation of it, so its
+     tile stays a reference count and is left out of the caption below. */
   $("tally").innerHTML = tiles.join("");
 
   const caption = $("tallyNote");
@@ -295,9 +312,10 @@ function renderTally(stats) {
   const anySplit = VERDICTS.some((v) => (claims[v] || 0) !== (refs[v] || 0));
   caption.hidden = !tiles.length || !anySplit;
   caption.textContent =
-    "Big number counts references; a reference takes the verdict of its most " +
-    "concerning citation. The line beneath each tile counts the individual " +
-    "citations, which is what the cards below show.";
+    "Big number counts individual citations. A reference cited several times " +
+    "appears in every section its citations fall into — four supported " +
+    "citations and one unverified put it under both — so the section counts " +
+    "add up to more than the number of references.";
 }
 
 function plural(n, word) {
@@ -315,12 +333,17 @@ function renderWarnings(warnings) {
 }
 
 function renderFilters(counts, references) {
+  /* Counts the cards each section will actually show — references carrying at
+     least one citation of that verdict, not references headlining as it. The
+     sections overlap by design, so these sum to more than the "All" count: a
+     reference that supports four claims and cannot settle a fifth is genuinely
+     in two of them, and hiding it from either is the bug this replaces. */
   const present = ["all", ...VERDICTS.filter((v) => counts[v])];
-  /* These filter cards, and a card is a reference — so these are reference
-     counts, matching the big number on each tile rather than its citation line. */
   $("filters").innerHTML = present
     .map((v) => `<button data-f="${v}" title="${
-      v === "all" ? "Every reference" : `References headlining as ${VERDICT_LABEL[v]}`
+      v === "all"
+        ? "Every reference"
+        : `References with at least one citation judged ${VERDICT_LABEL[v]}`
     }">${
       v === "all" ? `All (${references.length})` : `${VERDICT_LABEL[v]} (${counts[v]})`
     }</button>`)
@@ -333,6 +356,25 @@ function renderFilters(counts, references) {
       renderCards();
     });
   });
+}
+
+/* Every verdict a reference carries, not just the one on its headline.
+
+   A reference cited five times holds five judgements and the headline is only
+   the most concerning of them, so asking it which section a card belongs in
+   gives one answer where there are several — and a reference that supports four
+   claims and cannot settle a fifth vanishes from the supported section behind
+   its own worst citation. Mirrors `pipeline.verdicts_in`, which counts them. */
+function verdictsIn(entry) {
+  const claims = entry.claim_verdicts || [];
+  const found = new Set(claims.map((c) => c.verdict));
+  // Nothing but a headline to go on, or a headline the reader set by hand —
+  // which has to be findable under the verdict they chose even where the
+  // citations beneath it disagree.
+  if (!claims.length || entry.reviewed?.source === "reference") found.add(entry.verdict);
+  found.delete(undefined);
+  found.delete("");
+  return found;
 }
 
 /* Most concerning first, so the findings that matter are never below the fold. */
@@ -351,7 +393,7 @@ function urgency(entry) {
 
 function renderCards() {
   const list = (currentReport.references || [])
-    .filter((r) => activeFilter === "all" || r.verdict === activeFilter)
+    .filter((r) => activeFilter === "all" || verdictsIn(r).has(activeFilter))
     .sort((a, b) => urgency(b) - urgency(a));
 
   $("cards").innerHTML = list.map(cardHtml).join("") ||
@@ -479,12 +521,7 @@ async function runRecheck(key, file, claimIndex = null) {
     patchEntry(key, data.entry, data.stats, data.warnings);
     keepInPlace(key, () => {
       refreshSummary();
-      if (activeFilter !== "all" && data.entry.verdict !== activeFilter) {
-        activeFilter = "all";
-        renderCards();
-      } else {
-        replaceCard(key);      // the card, and every control on it, is rebuilt
-      }
+      replaceCard(key);        // the card, and every control on it, is rebuilt
     });
     reportRecheck(key, data.entry, claimIndex);
   } catch (err) {
@@ -520,18 +557,14 @@ async function setVerdict(key, fields) {
     patchEntry(key, data.entry, data.stats, data.warnings);
     openKeys.add(key);
 
-    /* Changing a verdict can move a card out of the category being filtered on,
-       and a card that silently disappears the moment you edit it reads as the
-       edit having failed. Drop back to "all" so the reader keeps sight of the
-       thing they just changed — the only case that needs the whole list rebuilt. */
+    /* The card is rebuilt where it stands and the list is never re-sorted, so
+       editing a verdict cannot move a card to a new position or drop it out
+       from under the reader. It may no longer match the filter it is sitting
+       in; it stays visible until the next filter change, which is the moment
+       the reader is asking to see the list rearranged. */
     keepInPlace(key, () => {
       refreshSummary();
-      if (activeFilter !== "all" && data.entry.verdict !== activeFilter) {
-        activeFilter = "all";
-        renderCards();
-      } else {
-        replaceCard(key);
-      }
+      replaceCard(key);
     });
 
     const now = VERDICT_LABEL[data.entry.verdict] || data.entry.verdict;
@@ -659,6 +692,21 @@ function cardHtml(entry) {
     entry.reviewed ? `<span class="chip reviewed">Your verdict</span>` : "",
   ].join("");
 
+  /* What this reference's citations actually came to, on the head where it is
+     readable without opening the card. The headline badge beside it is only the
+     most concerning of these, and on a reference cited five times that single
+     badge is what makes four supported citations look like they do not exist. */
+  const perClaim = entry.claim_verdicts || [];
+  const breakdown = perClaim.length > 1
+    ? `<div class="card-tally">${VERDICTS
+        .map((v) => [v, perClaim.filter((c) => c.verdict === v).length])
+        .filter(([, n]) => n)
+        .map(([v, n]) => `<span class="pip ${v}${
+          v === activeFilter ? " lit" : ""
+        }">${n} ${esc(VERDICT_LABEL[v])}</span>`)
+        .join("")}</div>`
+    : "";
+
   /* Evidence images are written back to the same filenames on a re-check, so
      the browser would keep serving the pre-recheck capture from cache. */
   const shotVersion = entry.rechecked?.at || "";
@@ -747,6 +795,7 @@ function cardHtml(entry) {
       <div class="card-title">
         <h3>${esc(title)}${chips}</h3>
         <div class="sub">${esc(truncate(entry.reason || "", 180))}</div>
+        ${breakdown}
       </div>
       <span class="chev">›</span>
     </div>
@@ -892,8 +941,14 @@ function claimHtml(claim, paperUrl, key, index) {
           : ""}</p>`
     : "";
 
+  /* Filtered to one verdict, the reader is looking for the citations that put
+     this card in that section — which on a card of five may be one of them.
+     Marking them is the difference between "this reference is unverified" and
+     "this one citation of it is", which is the whole distinction. */
+  const lit = activeFilter !== "all" && verdict === activeFilter ? " lit" : "";
+
   return `
-    <div class="claim ${esc(verdict)}${claim.override ? " mine" : ""}">
+    <div class="claim ${esc(verdict)}${claim.override ? " mine" : ""}${lit}">
       <div class="claim-top">
         <span class="badge ${esc(verdict)}">${esc(VERDICT_LABEL[verdict] || verdict)}</span>
         ${page}${revisited}${mine}

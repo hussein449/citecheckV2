@@ -118,6 +118,59 @@ class TallyCountsBothLevelsTest(unittest.TestCase):
         self.assertEqual(stats["claim_verdicts"], {})
 
 
+class SectionsOverlapTest(unittest.TestCase):
+    """A reference belongs in every section its citations fall into.
+
+    Filtering on the headline alone is how a reference that supports four claims
+    and cannot settle a fifth disappears from the supported section entirely —
+    it is filed once, under its worst citation, and its four good ones are
+    unreachable.
+    """
+
+    def setUp(self):
+        self.report = pipeline.summarise(_report([
+            _entry("1", "unverified", ["supported", "supported", "unverified"]),
+            _entry("2", "supported", ["supported", "supported"]),
+            _entry("3", "weak", ["weak", "related"]),
+        ]))
+        self.stats = self.report["stats"]
+
+    def test_a_mixed_reference_is_counted_in_both_sections(self):
+        holding = self.stats["references_with"]
+        self.assertEqual(holding["supported"], 2)   # refs 1 and 2
+        self.assertEqual(holding["unverified"], 1)  # ref 1, again
+
+    def test_it_differs_from_the_headline_count(self):
+        """Ref 1 headlines as unverified but holds supported citations too."""
+        self.assertEqual(self.stats["verdicts"]["supported"], 1)
+        self.assertEqual(self.stats["references_with"]["supported"], 2)
+
+    def test_the_sections_are_allowed_to_sum_past_the_reference_count(self):
+        self.assertGreater(sum(self.stats["references_with"].values()),
+                           len(self.report["references"]))
+
+    def test_every_citation_verdict_reaches_a_section(self):
+        for verdict in self.stats["claim_verdicts"]:
+            self.assertIn(verdict, self.stats["references_with"])
+
+    def test_a_reference_with_no_citations_falls_back_to_its_headline(self):
+        stats = pipeline.summarise(_report([
+            {**_entry("1", "not_found", []), "claim_verdicts": []},
+        ]))["stats"]
+        self.assertEqual(stats["references_with"], {"not_found": 1})
+
+    def test_a_hand_set_headline_is_findable_under_its_own_verdict(self):
+        entry = _entry("1", "supported", ["weak", "weak"])
+        entry["reviewed"] = {"source": "reference", "verdict": "supported"}
+        found = pipeline.verdicts_in(entry)
+        self.assertEqual(found, {"weak", "supported"})
+
+    def test_a_headline_rolled_up_from_claims_adds_no_section(self):
+        """It is a summary of the citations, not a verdict of its own."""
+        entry = _entry("1", "weak", ["weak", "supported"])
+        self.assertEqual(pipeline.verdicts_in(entry), {"weak", "supported"})
+
+
 # --------------------------------------------------------------------------- #
 # Rolling up
 # --------------------------------------------------------------------------- #

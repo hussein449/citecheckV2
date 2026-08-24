@@ -321,6 +321,14 @@ def summarise(report: dict) -> dict:
     # reader is looking at, which is why a tally that omits them reads as simply
     # wrong. Both numbers are kept so the summary can show both.
     claim_verdicts: dict[str, int] = {}
+    # How many references carry at least one citation of each verdict. This is
+    # what a reader is actually asking for when they filter to "unverified" on a
+    # report whose references are cited several times each: a reference that
+    # supports four claims and cannot settle a fifth belongs under *both*
+    # headings, and filtering on the headline alone hides its four good
+    # citations behind its worst one. Sections built from this overlap, so the
+    # counts here deliberately sum to more than the number of references.
+    containing: dict[str, int] = {}
     derived: list[str] = []
     flagged = retracted = not_found = claims_judged = rechecked = reviewed = 0
     claims_reviewed = 0
@@ -329,6 +337,8 @@ def summarise(report: dict) -> dict:
         verdicts[entry["verdict"]] = verdicts.get(entry["verdict"], 0) + 1
         for claim in entry.get("claim_verdicts") or []:
             claim_verdicts[claim["verdict"]] = claim_verdicts.get(claim["verdict"], 0) + 1
+        for verdict in verdicts_in(entry):
+            containing[verdict] = containing.get(verdict, 0) + 1
         claims_judged += len(entry.get("claim_verdicts") or [])
         if (entry.get("source") or {}).get("retracted"):
             retracted += 1
@@ -351,6 +361,7 @@ def summarise(report: dict) -> dict:
 
     stats["verdicts"] = verdicts
     stats["claim_verdicts"] = claim_verdicts
+    stats["references_with"] = containing
     stats["flagged"] = flagged
     stats["retracted"] = retracted
     stats["not_found"] = not_found
@@ -363,6 +374,26 @@ def summarise(report: dict) -> dict:
 
     report["warnings"] = list(dict.fromkeys(base + derived))
     return report
+
+
+def verdicts_in(entry: dict) -> set[str]:
+    """Every verdict a reference carries, not just the one on its headline.
+
+    A reference cited five times holds five judgements, and the headline is only
+    the most concerning of them. Asking "which sections does this belong in"
+    with the headline gives one answer where there are several, which is how a
+    card supporting four claims disappears from the supported section entirely.
+
+    A reference with no citation-level verdicts has nothing but its headline, so
+    that is what it carries. A headline the reader set by hand is included even
+    when the citations disagree with it, because it is their answer for the card
+    and it has to be findable under the verdict they chose.
+    """
+    claims = entry.get("claim_verdicts") or []
+    found = {c["verdict"] for c in claims}
+    if not claims or (entry.get("reviewed") or {}).get("source") == "reference":
+        found.add(entry.get("verdict", ""))
+    return {v for v in found if v}
 
 
 # How each engine is named in prose written for the reader.
