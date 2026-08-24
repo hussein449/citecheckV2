@@ -310,15 +310,6 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 }
 .warnings strong { color: var(--ink); }
 .warnings ul { margin: 6px 0 0; padding-left: 19px; }
-/* A finding the reader has ruled on. Struck through rather than removed — the
-   paper is still retracted, and whoever receives the exported report needs to
-   see both the finding and that somebody decided about it. */
-.warnings li.resolved { color: var(--ink-dim); text-decoration: line-through;
-  text-decoration-color: var(--line-strong); }
-.warn-count {
-  margin-left: 8px; font-size: 11px; font-weight: 600; letter-spacing: .03em;
-  color: var(--ink-dim); text-transform: uppercase;
-}
 .warnings li { margin: 2px 0; }
 
 /* ── Filters ────────────────────────────────────────────── */

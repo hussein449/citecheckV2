@@ -330,10 +330,6 @@ def summarise(report: dict) -> dict:
     # counts here deliberately sum to more than the number of references.
     containing: dict[str, int] = {}
     derived: list[str] = []
-    # Findings the reader has already dealt with. Kept, because a retraction
-    # does not stop being true when someone reads it — but moved below the
-    # outstanding ones, so this box works as a list of what is left.
-    settled: list[str] = []
     flagged = retracted = not_found = claims_judged = rechecked = reviewed = 0
     claims_reviewed = 0
     # The same findings, minus the ones the reader has already been through.
@@ -374,11 +370,15 @@ def summarise(report: dict) -> dict:
         for flag in entry.get("flags", []):
             if flag["severity"] == "high":
                 flagged += 1
-                if not resolved:
-                    flagged_open += 1
-                (settled if resolved else derived).append(
-                    f"[{entry['key']}] {flag['message']}{note}"
-                )
+                # A finding the reader has ruled on leaves this box entirely.
+                # It is not lost: the flag stays on the reference itself and
+                # still prints on its card, in the exported report and in
+                # `flags` on disk. What clears is the summary, which is a list
+                # of what is still waiting on somebody.
+                if resolved:
+                    break
+                flagged_open += 1
+                derived.append(f"[{entry['key']}] {flag['message']}{note}")
                 break
 
     stats["verdicts"] = verdicts
@@ -399,22 +399,7 @@ def summarise(report: dict) -> dict:
     stats.update(_engine_outcome(references, stats, derived))
     stats["risk"] = risk_summary(stats)
 
-    # `warnings` stays a flat list of strings: it is what `report.json` has
-    # always held and what anything reading a saved report expects. The paired
-    # list says which of them are still outstanding, so the box can show a
-    # finding as settled instead of just carrying a longer sentence.
-    items: list[dict] = []
-    seen: set[str] = set()
-    for text, addressed in (
-        [(t, False) for t in base + derived] + [(t, True) for t in settled]
-    ):
-        if text in seen:
-            continue
-        seen.add(text)
-        items.append({"text": text, "addressed": addressed})
-
-    report["warning_items"] = items
-    report["warnings"] = [item["text"] for item in items]
+    report["warnings"] = list(dict.fromkeys(base + derived))
     return report
 
 
@@ -588,22 +573,15 @@ def risk_summary(stats: dict) -> dict:
     level = "clear"
 
     for key, rule_level, singular, plural in _RISK_RULES:
-        # What is still waiting on somebody drives the headline. A finding the
-        # reader has opened, read and ruled on is reported after it and does not
-        # set the level — but it is never dropped, because the paper is still
-        # retracted and whoever receives the exported report was not in the room
-        # when that call was made.
-        total = stats.get(key, 0)
-        open_count = stats.get(f"{key}_open", total)
-        if open_count:
-            level = rule_level
-            headlines.append((singular if open_count == 1 else plural).format(n=open_count))
-        settled_count = total - open_count
-        if settled_count:
-            headlines.append(
-                (singular if settled_count == 1 else plural).format(n=settled_count)
-                + ", which you have reviewed"
-            )
+        # Only what is still waiting on somebody. A finding the reader has
+        # opened, read and ruled on leaves this banner — it stays on the
+        # reference's own card, and the hand-set-verdict line at the foot of
+        # this list says human judgement is in play.
+        count = stats.get(f"{key}_open", stats.get(key, 0))
+        if not count:
+            continue
+        level = rule_level
+        headlines.append((singular if count == 1 else plural).format(n=count))
 
     misrepresented = verdicts.get("unrelated", 0) + verdicts.get("weak", 0)
     if misrepresented:
@@ -621,23 +599,20 @@ def risk_summary(stats: dict) -> dict:
             f"{high_flags} reference carries a high-severity flag" if high_flags == 1
             else f"{high_flags} references carry a high-severity flag"
         )
-    settled_flags = stats.get("flagged", 0) - high_flags
-    if settled_flags:
-        headlines.append(
-            f"{settled_flags} flagged reference you have reviewed" if settled_flags == 1
-            else f"{settled_flags} flagged references you have reviewed"
-        )
+
 
     unverified = verdicts.get("unverified", 0)
     if unverified > checked * 0.4 and level == "clear":
         level = "review"
         headlines.append(
-            f"{unverified} of {checked} {noun}s could not be verified — mostly paywalls"
+            f"{unverified} of {checked} {noun}{'' if checked == 1 else 's'} "
+            "could not be verified — mostly paywalls"
         )
 
     if not headlines:
         headlines.append(
-            f"No integrity problems were found in the {checked} {noun}s checked"
+            f"No integrity problems were found in the {checked} "
+            f"{noun}{'' if checked == 1 else 's'} checked"
         )
 
     # Said last, and said whatever the outcome. The banner is the one line a

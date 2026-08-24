@@ -320,10 +320,6 @@ def _one_reference(report: dict, key: str) -> dict:
         ),
         "stats": report.get("stats", {}),
         "warnings": report.get("warnings", []),
-        # Paired with the above: which of those findings are still outstanding.
-        # Left out, the summary box reverts to treating every line as open the
-        # moment one reference changes.
-        "warning_items": report.get("warning_items", []),
     }
 
 

@@ -336,10 +336,23 @@ class FindingsResolveTest(unittest.TestCase):
     def test_reviewing_it_stops_it_driving_the_level(self):
         self.assertNotEqual(self.stats_for(reviewed=True)["risk"]["level"], "critical")
 
-    def test_the_finding_is_still_reported(self):
+    def test_the_finding_leaves_the_banner_entirely(self):
         headlines = self.stats_for(reviewed=True)["risk"]["headlines"]
-        self.assertTrue(any("retracted" in h for h in headlines))
-        self.assertTrue(any("you have reviewed" in h for h in headlines))
+        self.assertFalse(any("retracted" in h for h in headlines))
+        self.assertFalse(any("high-severity flag" in h for h in headlines))
+
+    def test_the_banner_still_says_a_person_decided(self):
+        """The one thing that must survive: this report is not clear on the
+        tool's own findings, it is clear because somebody overruled them."""
+        headlines = self.stats_for(reviewed=True)["risk"]["headlines"]
+        self.assertTrue(any("set by hand after review" in h for h in headlines))
+
+    def test_the_flag_stays_on_the_reference_itself(self):
+        """Cleared from the summary, not from the report — the card still
+        carries it, and so does the exported PDF."""
+        stats = self.stats_for(reviewed=True)
+        self.assertEqual(stats["flagged"], 1)
+        self.assertEqual(stats["retracted"], 1)
 
     def test_the_totals_are_untouched_so_the_tile_still_shows_it(self):
         stats = self.stats_for(reviewed=True)
@@ -386,17 +399,32 @@ class WarningsFollowTheEntriesTest(unittest.TestCase):
         ])
         self.assertEqual(report["warnings"], ["No bibliography heading was found."])
 
-    def test_a_finding_the_reader_handled_says_so(self):
-        """It is still true, so it stays — but not looking identical to one
-        nobody has touched, or an hour of re-checking leaves the box unchanged."""
+    def test_a_finding_the_reader_ruled_on_disappears(self):
         report = self.report_with([
             {**_entry("106", "supported", ["supported"]), "flags": self.FLAG,
              "reviewed": {"verdict": "supported", "source": "reference"}},
         ])
+        self.assertFalse(any(w.startswith("[106]") for w in report["warnings"]))
+
+    def test_the_box_empties_once_everything_is_ruled_on(self):
+        """With nothing left outstanding it hides, which is the point of it."""
+        base = _report([
+            {**_entry("106", "supported", ["supported"]), "flags": self.FLAG,
+             "reviewed": {"verdict": "supported", "source": "reference"}},
+        ])
+        base["base_warnings"] = []
+        self.assertEqual(pipeline.summarise(base)["warnings"], [])
+
+    def test_a_re_checked_but_unresolved_finding_stays_and_says_so(self):
+        """A re-check does not settle it, so it is still on the list — but the
+        line says the reader has been here, so they do not re-do the work."""
+        report = self.report_with([
+            {**_entry("106", "supported", ["supported"]), "flags": self.FLAG,
+             "rechecked": {"against": "sources", "outcome": "judged", "at": "now"}},
+        ])
         line = next(w for w in report["warnings"] if w.startswith("[106]"))
         self.assertIn("This work was RETRACTED.", line)
-        self.assertIn("you have since judged this", line)
-        self.assertIn("supported", line)
+        self.assertIn("you have since re-checked this", line)
 
     def test_a_re_check_against_a_supplied_file_is_named(self):
         report = self.report_with([
@@ -427,45 +455,21 @@ class WarningsFollowTheEntriesTest(unittest.TestCase):
         line = next(w for w in report["warnings"] if w.startswith("[106]"))
         self.assertIn("nothing could be retrieved", line)
 
-    def test_untouched_findings_come_before_handled_ones(self):
-        """The box has to work as a list of what is left."""
+    def test_only_what_is_left_is_listed(self):
+        """The box is a list of outstanding work, so a settled item is gone."""
         report = self.report_with([
             {**_entry("1", "supported", ["supported"]), "flags": self.FLAG,
              "reviewed": {"verdict": "supported", "source": "reference"}},
             {**_entry("2", "unverified", ["unverified"]), "flags": self.FLAG},
         ])
         keys = [w[:4] for w in report["warnings"] if w.startswith("[")]
-        self.assertEqual(keys, ["[2] ", "[1] "])
+        self.assertEqual(keys, ["[2] "])
 
     def test_an_untouched_finding_is_left_exactly_as_it_was(self):
         report = self.report_with([
             {**_entry("106", "unverified", ["unverified"]), "flags": self.FLAG},
         ])
         self.assertIn("[106] This work was RETRACTED.", report["warnings"])
-
-    def test_a_reviewed_finding_is_marked_resolved(self):
-        report = self.report_with([
-            {**_entry("106", "supported", ["supported"]), "flags": self.FLAG,
-             "reviewed": {"verdict": "supported", "source": "reference"}},
-        ])
-        item = next(i for i in report["warning_items"] if i["text"].startswith("[106]"))
-        self.assertTrue(item["addressed"])
-
-    def test_an_untouched_finding_is_not(self):
-        report = self.report_with([
-            {**_entry("106", "unverified", ["unverified"]), "flags": self.FLAG},
-        ])
-        item = next(i for i in report["warning_items"] if i["text"].startswith("[106]"))
-        self.assertFalse(item["addressed"])
-
-    def test_the_flat_list_still_carries_every_finding(self):
-        """`report.json` has always held strings, and readers of it expect them."""
-        report = self.report_with([
-            {**_entry("106", "supported", ["supported"]), "flags": self.FLAG,
-             "reviewed": {"verdict": "supported", "source": "reference"}},
-        ])
-        self.assertEqual(report["warnings"],
-                         [i["text"] for i in report["warning_items"]])
 
     def test_the_parse_warning_survives_both(self):
         """It describes reading the PDF, which no re-check re-does."""

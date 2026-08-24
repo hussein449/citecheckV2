@@ -185,21 +185,18 @@ function refreshSummary() {
 
   renderRisk(s.risk);
   renderTally(s);
-  renderWarnings(report.warnings, report.warning_items);
+  renderWarnings(report.warnings);
   renderFilters(s.references_with || s.verdicts || {}, report.references || []);
 }
 
 /* Fold a single changed reference into the report the page is holding, without
    the server having to send back the other 149. */
-function patchEntry(key, entry, stats, warnings, items) {
+function patchEntry(key, entry, stats, warnings) {
   const list = currentReport.references || [];
   const at = list.findIndex((r) => r.key === key);
   if (at >= 0) list[at] = entry;
   if (stats) currentReport.stats = stats;
   if (warnings) currentReport.warnings = warnings;
-  // Without this the box falls back to the flat strings on the first edit, and
-  // everything the reader had resolved comes back looking outstanding.
-  if (items) currentReport.warning_items = items;
 }
 
 /* Rebuild whatever a verdict change touched without the page moving under the
@@ -325,25 +322,16 @@ function plural(n, word) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
-/* Takes the paired list where it exists — each finding with whether it is still
-   outstanding — and falls back to the flat strings for a report saved before
-   that existed. A finding the reader has ruled on is struck through rather than
-   removed: it is still true, and the exported report has to carry it. */
-function renderWarnings(warnings, items) {
+/* Only what is still outstanding. A finding the reader has ruled on is gone
+   from here — it stays on its own reference's card, flags and all, which is
+   where somebody goes to see what was decided and why. */
+function renderWarnings(warnings) {
   const box = $("warnings");
-  const list = items?.length
-    ? items
-    : (warnings || []).map((text) => ({ text, addressed: false }));
-  if (!list.length) { box.hidden = true; return; }
-
-  const open = list.filter((w) => !w.addressed).length;
-  const done = list.length - open;
+  if (!warnings?.length) { box.hidden = true; return; }
   box.hidden = false;
   box.innerHTML =
-    `<strong>Worth knowing</strong>${
-      done ? `<span class="warn-count">${open} outstanding · ${done} you have resolved</span>` : ""
-    }<ul>` +
-    list.map((w) => `<li${w.addressed ? ' class="resolved"' : ""}>${esc(w.text)}</li>`).join("") +
+    "<strong>Worth knowing</strong><ul>" +
+    warnings.map((w) => `<li>${esc(w)}</li>`).join("") +
     "</ul>";
 }
 
@@ -541,7 +529,7 @@ async function runRecheck(key, file, claimIndex = null) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Re-check failed (${res.status})`);
 
-    patchEntry(key, data.entry, data.stats, data.warnings, data.warning_items);
+    patchEntry(key, data.entry, data.stats, data.warnings);
     keepInPlace(key, () => {
       refreshSummary();
       replaceCard(key);        // the card, and every control on it, is rebuilt
@@ -577,7 +565,7 @@ async function setVerdict(key, fields) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Could not save that (${res.status})`);
 
-    patchEntry(key, data.entry, data.stats, data.warnings, data.warning_items);
+    patchEntry(key, data.entry, data.stats, data.warnings);
     openKeys.add(key);
 
     /* The card is rebuilt where it stands and the list is never re-sorted, so
