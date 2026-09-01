@@ -314,7 +314,19 @@ def _content_words(text: str) -> list[str]:
     return [w for w in _WORD.findall(text) if w.lower() not in _THIN and len(w) > 2]
 
 
-def _clause_for(sentence: str, markers: list[_Marker], index: int) -> str:
+# A table has no sentence terminator anywhere in it, so the whole thing arrives
+# as one "sentence" carrying one marker per row. No sentence anyone wrote cites
+# this many sources at once — the busiest real one in a paper runs to four or
+# five — so the count alone separates the two.
+_TABLE_MARKERS = 8
+
+
+def _clause_for(
+    sentence: str,
+    markers: list[_Marker],
+    index: int,
+    leading: bool = False,
+) -> str:
     """The stretch of *sentence* that marker *index* is answerable for.
 
     A clause runs from the end of the previous marker through this one; the last
@@ -322,9 +334,21 @@ def _clause_for(sentence: str, markers: list[_Marker], index: int) -> str:
     predicate the whole list depends on. A clause too thin to mean anything on
     its own falls back to the full sentence rather than being judged as a
     fragment — half a claim is worse evidence than a shared one.
+
+    ``leading`` reverses that direction for a table whose reference number is
+    printed in the first column. There the marker introduces the row instead of
+    closing a clause, so reading backwards hands every row to the number below
+    it and the whole table is judged one row out of step. Reading forwards is
+    also why the thin-clause fallback is skipped here: a sparse row is still
+    that row, and widening it would substitute the entire table.
     """
     if len(markers) < 2:
         return sentence
+
+    if leading:
+        start = markers[index].start
+        end = markers[index + 1].start if index + 1 < len(markers) else len(sentence)
+        return sentence[start:end].strip(" ,;:")
 
     start = markers[index - 1].end if index else 0
     end = markers[index].end if index + 1 < len(markers) else len(sentence)
@@ -336,7 +360,45 @@ def _clause_for(sentence: str, markers: list[_Marker], index: int) -> str:
     return clause
 
 
-def _is_prose(sentence: str) -> bool:
+def _row_labels(
+    body: str,
+    flat: "_Flat",
+    sent_offset: int,
+    sentence: str,
+    markers: list[_Marker],
+) -> bool:
+    """Do these markers open their lines, the way a table's row labels do?
+
+    Flattening a table loses the one thing that says which way a marker points:
+    on the page a row label sits alone at the start of its line, while a prose
+    marker sits mid-line at the end of the clause it closes. The original text
+    still has the line breaks, so ask it.
+
+    Asked per marker this would be noise — prose wraps, and a marker can land at
+    a line start by accident — so it is a vote across the whole block. A marker
+    whose mapped offset does not still hold its own text has drifted and simply
+    does not vote.
+    """
+    if len(markers) < _TABLE_MARKERS:
+        return False
+
+    opens = decided = 0
+    for marker in markers:
+        label = sentence[marker.start:marker.end]
+        at = flat.origin(sent_offset + marker.start)
+        if body[at:at + len(label)] != label:
+            continue
+        decided += 1
+        before = at - 1
+        while before >= 0 and body[before] in " \t":
+            before -= 1
+        if before < 0 or body[before] == "\n":
+            opens += 1
+
+    return decided >= len(markers) * 0.5 and opens >= decided * 0.7
+
+
+def _is_prose(sentence: str, marker_count: int = 0) -> bool:
     """Does this read as an assertion, or as a table row / heading / legend?
 
     Non-prose markers are kept — a reference cited only from a comparison table
@@ -345,6 +407,13 @@ def _is_prose(sentence: str) -> bool:
     judged. Scoring a source against "Ref. Method Year Dataset" yields a "weak"
     verdict about nothing at all.
     """
+    # Both tests below are ratios, so a table large enough dilutes each of them
+    # past its threshold and the whole table reads as one prose sentence: the
+    # column headings stop outweighing the lowercase cell text, and the digit
+    # budget grows with the very length that should have condemned it. A row
+    # count does not dilute.
+    if marker_count >= _TABLE_MARKERS:
+        return False
     bare = _BRACKETED.sub(" ", sentence)
     words = _WORD.findall(bare)
     if len(words) < 6:
@@ -389,10 +458,17 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
             continue
 
         page = page_of_offset(flat.origin(sent_offset)) if page_of_offset else 1
-        prose = _is_prose(sentence)
+        prose = _is_prose(sentence, len(markers))
+        leading = _row_labels(body_text, flat, sent_offset, sentence, markers)
 
         for index, marker in enumerate(markers):
-            claim = _clause_for(sentence, markers, index)
+            claim = _clause_for(sentence, markers, index, leading=leading)
+            # A whole flattened table is no one's context. Where the row is the
+            # claim it is also all the context there is, and quoting the rest of
+            # the table back at the reader — or at the judge — only invites a
+            # verdict about somebody else's row.
+            context = claim if leading else sentence
+            window = _window(context, 0 if leading else marker.start)
             if marker.style == "numeric":
                 numeric_hits += len(marker.keys)
             else:
@@ -404,9 +480,9 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
                         key=key,
                         label=label,
                         style=marker.style,
-                        sentence=sentence,
+                        sentence=context,
                         claim=claim,
-                        line=_window(sentence, marker.start),
+                        line=window,
                         page=page,
                         char_offset=sent_offset + marker.start,
                         group_size=len(marker.keys),
