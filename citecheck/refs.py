@@ -8,6 +8,7 @@ the next stage.
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from dataclasses import dataclass, field, asdict
 
 from .intext import normalise_key
@@ -132,12 +133,144 @@ def _split_numbered(refs_text: str) -> list[tuple[int | None, str]]:
     if ascending < (len(numbers) - 1) * 0.6:
         return []
 
+    matches, numbers = _drop_strays(refs_text, matches, numbers)
+    if len(matches) < 2:
+        return []
+
     chunks: list[tuple[int | None, str]] = []
     for idx, match in enumerate(matches):
         start = match.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(refs_text)
         chunks.append((numbers[idx], refs_text[start:end]))
-    return chunks
+
+    # Everything above the first marker is normally just the "References"
+    # heading. When the first marker found is not [1] it is the opening entries
+    # instead, and they would be dropped along with the heading.
+    head = refs_text[: matches[0].start()]
+    if numbers[0] > 1 and head.strip():
+        opening = _recover(0, head, range(1, numbers[0]))
+        chunks = [chunk for chunk in opening if chunk[0]] + chunks
+
+    return _fill_gaps(chunks)
+
+
+# A number that ends the previous entry rather than opening the next one is
+# preceded by the comma that introduced it: "Royal Society Open Science, 11."
+_CONTINUES_ENTRY = (",", ";", ":")
+
+
+def _char_before(text: str, at: int) -> str:
+    idx = at - 1
+    while idx >= 0 and text[idx].isspace():
+        idx -= 1
+    return text[idx] if idx >= 0 else ""
+
+
+def _drop_strays(
+    refs_text: str,
+    matches: list[re.Match],
+    numbers: list[int],
+) -> tuple[list[re.Match], list[int]]:
+    """Discard line-initial numbers that are not entry numbers.
+
+    A volume or page number wrapped onto its own line is the same shape as an
+    entry marker, and one landing between two entries silently becomes the
+    boundary for its own value — welding every entry from there to the next
+    match into a single reference that carries the wrong title. Two things tell
+    it apart, and both have to fail before a marker is dropped: it follows the
+    comma that introduced it, and it does not continue the count.
+
+    Whatever survives that is then reduced to its longest ascending run. Entry
+    numbers only ever ascend, so a number that goes backwards is furniture no
+    matter what precedes it — and picking the *longest* run rather than walking
+    left to right keeps a stray first match from evicting the real list behind
+    it.
+    """
+    kept: list[int] = []
+    last: int | None = None
+    for idx, (match, number) in enumerate(zip(matches, numbers)):
+        interrupts = last is not None and number != last + 1
+        if interrupts and _char_before(refs_text, match.start()) in _CONTINUES_ENTRY:
+            continue
+        kept.append(idx)
+        last = number
+
+    run = _longest_ascending([numbers[i] for i in kept])
+    kept = [kept[i] for i in run]
+    return [matches[i] for i in kept], [numbers[i] for i in kept]
+
+
+def _longest_ascending(numbers: list[int]) -> list[int]:
+    """Positions of the longest strictly ascending subsequence of *numbers*."""
+    tail_values: list[int] = []
+    tail_at: list[int] = []
+    came_from = [-1] * len(numbers)
+    for idx, number in enumerate(numbers):
+        pos = bisect_left(tail_values, number)
+        if pos:
+            came_from[idx] = tail_at[pos - 1]
+        if pos == len(tail_values):
+            tail_values.append(number)
+            tail_at.append(idx)
+        else:
+            tail_values[pos] = number
+            tail_at[pos] = idx
+
+    out: list[int] = []
+    idx = tail_at[-1] if tail_at else -1
+    while idx >= 0:
+        out.append(idx)
+        idx = came_from[idx]
+    return out[::-1]
+
+
+def _fill_gaps(chunks: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
+    """Recover entries the strict marker pattern walked past.
+
+    A separator the pattern does not accept — a tab, a zero-width space, no
+    separator at all — hides an entry inside its predecessor's chunk, and the
+    two are then welded into one reference carrying the earlier one's title and
+    identifiers. Every citation of the later entry is checked against the wrong
+    work, and every entry in between vanishes from the bibliography entirely.
+
+    A gap in the numbering says exactly which entries went missing and which
+    chunk they must be inside, which is enough to go back and cut them out.
+    """
+    filled: list[tuple[int | None, str]] = []
+    for idx, (number, raw) in enumerate(chunks):
+        following = chunks[idx + 1][0] if idx + 1 < len(chunks) else None
+        if number is None or following is None or following <= number + 1:
+            filled.append((number, raw))
+            continue
+        filled.extend(_recover(number, raw, range(number + 1, following)))
+    return filled
+
+
+def _recover(
+    number: int,
+    raw: str,
+    missing: range,
+) -> list[tuple[int | None, str]]:
+    """Cut *raw* at whichever of the *missing* entry numbers it still contains."""
+    cuts: list[tuple[int, int, int]] = []
+    at = 0
+    for want in missing:
+        pattern = re.compile(rf"(?m)^[ \t]*{want}[.)][ \t]*")
+        for found in pattern.finditer(raw, at):
+            if _char_before(raw, found.start()) in _CONTINUES_ENTRY:
+                continue
+            cuts.append((found.start(), found.end(), want))
+            at = found.end()
+            break
+
+    if not cuts:
+        return [(number, raw)]
+
+    pieces = [(number, raw[: cuts[0][0]])]
+    for idx, (_, end, want) in enumerate(cuts):
+        stop = cuts[idx + 1][0] if idx + 1 < len(cuts) else len(raw)
+        pieces.append((want, raw[end:stop]))
+    return pieces
 
 
 def _split_author_year(refs_text: str) -> list[tuple[int | None, str]]:

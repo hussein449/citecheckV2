@@ -65,6 +65,20 @@ class ParsedPDF:
 
 # Zero-width and soft-hyphen characters used by publishers as line-break hints.
 _INVISIBLE = re.compile("[​‌‍⁠﻿­]")
+# The same set written out as escapes, so the list-marker rule below can build
+# its own class from it without repeating characters no diff can show.
+_INVISIBLE_CLASS = "\u200b\u200c\u200d\u2060\ufeff\u00ad"
+# A numbered list whose only separator is a zero-width space. Word and Google
+# Docs both export bibliographies this way: "12.<ZWSP>I Abdulrashid" reads as
+# "12. I Abdulrashid" on the page, but deleting the character outright welds the
+# number onto the entry and leaves the bibliography splitter no boundary to
+# find, which drops every such entry from the reference list. Widen it to a real
+# space instead. A DOI carries the same character in the same position
+# ("10.<ZWSP>1109/"), so this stops short of the digit that always follows a DOI
+# prefix and leaves those to be deleted as before.
+_LIST_MARKER_INVISIBLE = re.compile(
+    rf"(?m)^([ \t]*\d{{1,3}}[.)])[{_INVISIBLE_CLASS}]+(?=[^\d\s])"
+)
 # Non-breaking, thin, and other exotic spaces, normalised to a plain space.
 _ODD_SPACES = re.compile("[       ]")
 _LIGATURES = {"ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff",
@@ -79,7 +93,10 @@ def _dehyphenate(text: str) -> str:
 def _normalise_whitespace(text: str) -> str:
     # Publishers inject invisible break opportunities into long strings, so a
     # DOI printed as "10.<ZWSP>1109/<ZWSP>ISTAS" reads normally but matches no
-    # pattern. Strip them before anything tries to read identifiers out.
+    # pattern. Strip them before anything tries to read identifiers out — but
+    # widen the ones doing a separator's job first, or the strip destroys the
+    # only boundary between a list number and the entry it introduces.
+    text = _LIST_MARKER_INVISIBLE.sub(r"\1 ", text)
     text = _INVISIBLE.sub("", text)
     text = _ODD_SPACES.sub(" ", text)
     for ligature, plain in _LIGATURES.items():
