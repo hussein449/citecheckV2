@@ -633,7 +633,7 @@ class BarrenRecheckTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def recheck_that_retrieves_nothing(self):
-        def dead(_reference):
+        def dead(_reference, _contact_email=""):
             raise ConnectionError("publisher unreachable")
 
         pipeline.resolve.resolve = dead

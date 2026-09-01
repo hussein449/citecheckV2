@@ -37,6 +37,11 @@ class Options:
     # Each citing sentence is judged on its own, so this bounds the model spend
     # on a reference that is cited a dozen times.
     max_claims_per_reference: int = 6
+    # Address sent to the open scholarly APIs. Unpaywall — the broadest source
+    # of open-access full text — refuses to answer without one, and Crossref
+    # and OpenAlex serve self-identifying callers from a faster pool. Empty
+    # falls back to CITECHECK_CONTACT_EMAIL.
+    contact_email: str = ""
 
 
 @dataclass
@@ -832,7 +837,7 @@ def _check_one(
 
     on_stage("looking the reference up in the citation indexes", "")
     try:
-        source = resolve.resolve(reference)
+        source = resolve.resolve(reference, options.contact_email)
     except Exception as exc:
         entry["notes"].append(f"Could not resolve a link: {type(exc).__name__}")
         entry["reason"] = "This reference could not be resolved to a retrievable source."
@@ -1377,7 +1382,7 @@ def _recheck_claim(
     if supplied is not None:
         body, title, abstract, failure = supplied.text, supplied.name, "", ""
     else:
-        body, title, abstract, failure = _retrieve_text(reference)
+        body, title, abstract, failure = _retrieve_text(reference, options)
 
     # Nothing came back, so nothing was learned. The citation keeps the verdict
     # it had — see the whole-reference case for why a failed lookup must never
@@ -1542,7 +1547,7 @@ def _claim_rollup_reason(claims: list[dict], claim_index: int, rolled: str) -> s
     ).strip()
 
 
-def _retrieve_text(reference: refs.Reference) -> tuple[str, str, str, str]:
+def _retrieve_text(reference: refs.Reference, options: Options) -> tuple[str, str, str, str]:
     """Resolve and fetch one reference, for judging a single citation against.
 
     Returns `(body, title, abstract, failure)`. `failure` is a reader-facing
@@ -1555,7 +1560,7 @@ def _retrieve_text(reference: refs.Reference) -> tuple[str, str, str, str]:
     asked it to.
     """
     try:
-        source = resolve.resolve(reference)
+        source = resolve.resolve(reference, options.contact_email)
     except Exception as exc:
         return "", "", "", f"The reference could not be looked up ({type(exc).__name__})."
 

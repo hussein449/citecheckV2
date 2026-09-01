@@ -29,7 +29,7 @@ pip install -r requirements.txt
 ```
 
 Drop a PDF on the page — up to 60 MB — and the run streams its progress as it
-goes. **Advanced settings** on the upload panel control the four things worth
+goes. **Advanced settings** on the upload panel control the five things worth
 changing:
 
 | Setting | Default | What it does |
@@ -38,10 +38,36 @@ changing:
 | Parallel workers | 4 | How many references are checked at once (1–8). Faster, and harder on publisher sites. |
 | Judge relevance with an AI model | on, when a key is set | Off scores the run lexically and costs nothing. |
 | Capture evidence screenshots | on, when a browser starts | Off skips the three captures and is much quicker. |
+| Contact email | from `CITECHECK_CONTACT_EMAIL` | Turns on Unpaywall, the broadest source of open-access full text. See [why it matters](#open-access-and-the-contact-email). |
 
 Both toggles are *disabled* rather than merely unchecked when the thing behind
 them is unavailable, and the header says which — a run that quietly fell back to
-lexical scoring because a key was missing is the failure nobody notices.
+lexical scoring because a key was missing is the failure nobody notices. The
+`Unpaywall off` chip works the same way and clears the moment a valid address is
+typed, so the header never claims one thing while the run does another.
+
+### Open access and the contact email
+
+Unpaywall finds free, legal copies of paywalled papers — author manuscripts in
+institutional repositories, publisher-hosted OA versions, preprint mirrors. It
+runs only as a fallback, when a reference has a DOI and neither OpenAlex nor
+Semantic Scholar turned up an open-access copy.
+
+It is worth having because of what CiteCheck reads when it judges. With an OA
+copy, a claim is judged against the paper's full text; without one, against the
+abstract alone. Same verdict machinery, far thinner evidence.
+
+The catch is that Unpaywall refuses anonymous callers: no address, no answer, so
+the lookup is skipped entirely. The address is not a secret and not a login — it
+is the courtesy identifier these APIs use for rate-limiting. Setting it also
+puts Crossref and OpenAlex calls in their polite pool, which is faster and more
+reliable; that second effect applies to every run, not just the paywalled ones.
+
+Set it in `.env` to make it the default for every run, or type it into Advanced
+settings for a one-off. A per-run address overrides the environment, is checked
+for shape before the upload is accepted rather than failing quietly mid-run, and
+is remembered in the browser so it only has to be typed once. Nothing about it
+is stored server-side.
 
 ## What it does
 
@@ -346,7 +372,7 @@ OPENAI_API_KEY=sk-...
 | `CITECHECK_LLM` | auto | `off` skips the model entirely and scores lexically. |
 | `CITECHECK_OPENAI_MODEL` | `gpt-4o` | Any model supporting structured outputs. |
 | `OPENAI_BASE_URL` | — | For Azure or any OpenAI-compatible gateway. |
-| `CITECHECK_CONTACT_EMAIL` | — | Your email. Not a secret — see below. |
+| `CITECHECK_CONTACT_EMAIL` | — | Your email, the default for every run. Not a secret — see [above](#open-access-and-the-contact-email). Overridable per run in Advanced settings. |
 | `CITECHECK_PASSWORD` / `_USERNAME` | — | One shared password in front of every route. See [beyond localhost](#a-shared-password). |
 | `CITECHECK_NO_SANDBOX` | — | `1` drops Chromium's sandbox, which a container needs. See [in a container](#in-a-container). |
 

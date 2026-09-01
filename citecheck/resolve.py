@@ -53,14 +53,15 @@ _CONTACT_EMAIL = (os.environ.get("CITECHECK_CONTACT_EMAIL") or "").strip()
 
 
 def contact_email() -> str:
+    """The environment's address — the default when a run supplies none of its own."""
     return _CONTACT_EMAIL
 
 
-def _polite(params: dict | None = None) -> dict:
+def _polite(params: dict | None = None, email: str = "") -> dict:
     """Add the contact address the open scholarly APIs ask for."""
     out = dict(params or {})
-    if _CONTACT_EMAIL:
-        out["mailto"] = _CONTACT_EMAIL
+    if email:
+        out["mailto"] = email
     return out
 
 
@@ -209,8 +210,14 @@ def _doi_is_anchored(src: ResolvedSource) -> bool:
     return src.search_agreement >= _CONFIRM_AGREEMENT
 
 
-def resolve(ref: Reference) -> ResolvedSource:
-    """Find the best URL + metadata for *ref*."""
+def resolve(ref: Reference, contact_email: str = "") -> ResolvedSource:
+    """Find the best URL + metadata for *ref*.
+
+    *contact_email* overrides CITECHECK_CONTACT_EMAIL for this call, so a run
+    can supply its own address without mutating module state a concurrent run
+    is reading at the same time. Empty falls back to the environment.
+    """
+    email = (contact_email or _CONTACT_EMAIL).strip()
     src = ResolvedSource()
     # Pinned before any lookup runs. Once an index has written a guess into
     # src.title, searching for *that* would just confirm the guess: a wrong
@@ -244,15 +251,15 @@ def resolve(ref: Reference) -> ResolvedSource:
 
     # Crossref: fills metadata for a known DOI, or finds the DOI from the string.
     if src.doi:
-        _enrich_crossref_by_doi(src, src.doi)
+        _enrich_crossref_by_doi(src, src.doi, email)
     elif not src.url or src.resolver == "explicit-url":
-        _lookup_crossref(src, ref)
+        _lookup_crossref(src, ref, email)
 
     # OpenAlex and Semantic Scholar each add an abstract and, crucially, an
     # open-access mirror. The abstract is the one thing that is nearly always
     # obtainable even when the publisher page is a paywall, so it is worth
     # asking more than one index before giving up on it.
-    _enrich_openalex(src, ref)
+    _enrich_openalex(src, ref, email)
     if not src.abstract or not src.oa_url:
         _enrich_semantic_scholar(src)
 
@@ -260,7 +267,7 @@ def resolve(ref: Reference) -> ResolvedSource:
     # into a full-text one. Europe PMC in particular hands back machine-readable
     # full text for anything deposited in PMC, which no other index here does.
     if src.doi and not src.oa_url:
-        _enrich_unpaywall(src)
+        _enrich_unpaywall(src, email)
     if src.doi or src.title:
         _enrich_europepmc(src)
 
@@ -384,9 +391,9 @@ def _enrich_arxiv(src: ResolvedSource, arxiv_id: str) -> None:
     _record(src, "arXiv", resp, found=bool(src.title))
 
 
-def _enrich_crossref_by_doi(src: ResolvedSource, doi: str) -> None:
+def _enrich_crossref_by_doi(src: ResolvedSource, doi: str, email: str = "") -> None:
     resp = _get(f"https://api.crossref.org/works/{requests.utils.quote(doi)}",
-                params=_polite())
+                params=_polite(email=email))
     if not resp or resp.status_code != 200:
         # 404 here is meaningful: Crossref is the DOI registry for scholarly
         # works, so a DOI it does not hold is very likely not a real DOI.
@@ -402,7 +409,7 @@ def _enrich_crossref_by_doi(src: ResolvedSource, doi: str) -> None:
     src.resolver = src.resolver or "crossref-doi"
 
 
-def _lookup_crossref(src: ResolvedSource, ref: Reference) -> None:
+def _lookup_crossref(src: ResolvedSource, ref: Reference, email: str = "") -> None:
     query = (ref.title or ref.raw)[:350]
     if len(query) < 12:
         return
@@ -413,7 +420,7 @@ def _lookup_crossref(src: ResolvedSource, ref: Reference) -> None:
             "rows": 5,
             "select": "DOI,title,author,issued,container-title,abstract,URL,score,"
                       "update-to,updated-by",
-        }),
+        }, email),
     )
     if not resp or resp.status_code != 200:
         _record(src, "Crossref", resp, found=False)
@@ -555,10 +562,10 @@ def _apply_crossref_integrity(src: ResolvedSource, item: dict) -> None:
             break
 
 
-def _enrich_openalex(src: ResolvedSource, ref: Reference) -> None:
+def _enrich_openalex(src: ResolvedSource, ref: Reference, email: str = "") -> None:
     if src.doi:
         url = f"https://api.openalex.org/works/doi:{src.doi}"
-        resp = _get(url, params=_polite())
+        resp = _get(url, params=_polite(email=email))
         item = _openalex_single(resp)
         confirmed = bool(item) and _doi_is_anchored(src)
     else:
@@ -567,7 +574,7 @@ def _enrich_openalex(src: ResolvedSource, ref: Reference) -> None:
             return
         resp = _get(
             "https://api.openalex.org/works",
-            params=_polite({"search": query, "per-page": 3}),
+            params=_polite({"search": query, "per-page": 3}, email),
         )
         item, agreement = None, -1.0
         for row in _openalex_results(resp):
@@ -677,19 +684,19 @@ def _enrich_semantic_scholar(src: ResolvedSource) -> None:
         src.pmcid = f"PMC{pmcid}" if not str(pmcid).upper().startswith("PMC") else str(pmcid)
 
 
-def _enrich_unpaywall(src: ResolvedSource) -> None:
+def _enrich_unpaywall(src: ResolvedSource, email: str = "") -> None:
     """Ask Unpaywall for a legal open-access copy of a DOI.
 
     Unpaywall has the broadest open-access coverage of anything here, but it
-    refuses to answer without a contact address, so this is a no-op until
-    CITECHECK_CONTACT_EMAIL is set.
+    refuses to answer without a contact address, so this is a no-op until one
+    is given — either CITECHECK_CONTACT_EMAIL or the address a run supplies.
     """
-    if not _CONTACT_EMAIL or not src.doi:
+    if not email or not src.doi:
         return
 
     resp = _get(
         f"https://api.unpaywall.org/v2/{requests.utils.quote(src.doi)}",
-        params={"email": _CONTACT_EMAIL},
+        params={"email": email},
     )
     item = _json_or_none(resp)
     _record(src, "Unpaywall", resp, found=bool(item))

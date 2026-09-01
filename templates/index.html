@@ -34,7 +34,8 @@
         <i></i>{{ 'Evidence capture' if capabilities.screenshots else 'No screenshots' }}
       </span>
       {% if not capabilities.contact_email %}
-      <span class="cap off" title="Set CITECHECK_CONTACT_EMAIL to enable Unpaywall, which finds free full-text copies behind paywalls.">
+      <span class="cap off" id="capUnpaywall"
+            title="Unpaywall finds free full-text copies of paywalled papers. It needs a contact address — add one under Advanced settings, or set CITECHECK_CONTACT_EMAIL.">
         <i></i>Unpaywall off
       </span>
       {% endif %}
@@ -95,6 +96,15 @@
             <input type="checkbox" id="useShots" {{ 'checked' if capabilities.screenshots else 'disabled' }}>
             <span>Capture evidence screenshots</span>
             <small>{{ 'The citing sentence, the source, and the matching passage.' if capabilities.screenshots else 'Run: python -m playwright install chromium' }}</small>
+          </label>
+          <label class="wide">
+            <span>Contact email{{ '' if capabilities.contact_email else ' — turns on Unpaywall' }}</span>
+            <input type="email" id="contactEmail" autocomplete="email" spellcheck="false"
+                   placeholder="{{ 'set by CITECHECK_CONTACT_EMAIL' if capabilities.contact_email else 'you@university.edu' }}">
+            <small>Unpaywall finds free full-text copies of paywalled papers, and
+              refuses to answer callers who do not identify themselves. Without
+              one, those references are judged on their abstract alone. Crossref
+              and OpenAlex also answer named callers faster.{{ ' Overrides the address set in the environment.' if capabilities.contact_email else '' }}</small>
           </label>
         </div>
       </details>

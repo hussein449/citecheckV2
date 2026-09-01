@@ -130,6 +130,10 @@ def upload():
     if not uploaded.filename.lower().endswith(".pdf"):
         return jsonify({"error": "Please upload a PDF."}), 400
 
+    email, complaint = _email_arg()
+    if complaint:
+        return jsonify({"error": complaint}), 400
+
     run_id = f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +147,7 @@ def upload():
         use_model=request.form.get("use_model", "1") != "0",
         take_screenshots=request.form.get("screenshots", "1") != "0",
         workers=_int_arg("workers", 4, 1, 8),
+        contact_email=email,
     )
 
     with _LOCK:
@@ -168,6 +173,29 @@ def _int_arg(name: str, default: int, low: int, high: int) -> int:
         return max(low, min(high, int(request.form.get(name, default))))
     except (TypeError, ValueError):
         return default
+
+
+# Deliberately loose — this only has to be good enough that a typo is caught
+# here rather than turning into a silently skipped Unpaywall lookup an hour
+# into a 250-reference run.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
+
+
+def _email_arg() -> tuple[str, str]:
+    """The run's contact address, and a complaint if what was typed is not one.
+
+    Returns `("", "")` when the field is blank — the environment's address then
+    applies. A bad address is worse than none, because Unpaywall rejects the
+    call and Crossref demotes the caller, so it is refused rather than dropped.
+    """
+    raw = (request.form.get("contact_email") or "").strip()
+    if not raw:
+        return "", ""
+    if len(raw) > 254 or not _EMAIL_RE.match(raw):
+        # Echoed back so the typo is visible, but clipped: the length check
+        # exists precisely because the field can hold something enormous.
+        return "", f"{raw[:80]!r} is not an email address."
+    return raw, ""
 
 
 def _run_pipeline(run_id: str, pdf_path: str, run_dir: Path, options: pipeline.Options) -> None:
@@ -270,10 +298,15 @@ def recheck(run_id: str):
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
+    email, complaint = _email_arg()
+    if complaint:
+        return jsonify({"error": complaint}), 400
+
     options = pipeline.Options(
         use_model=request.form.get("use_model", "1") != "0",
         take_screenshots=request.form.get("screenshots", "1") != "0" and _SHOTS_OK,
         max_claims_per_reference=_int_arg("max_claims", 6, 1, 20),
+        contact_email=email,
     )
 
     papers = sorted(UPLOADS_DIR.glob(f"{run_id}_*"))

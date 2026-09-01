@@ -65,11 +65,64 @@ fileInput.addEventListener("change", () => {
   if (fileInput.files?.[0]) startRun(fileInput.files[0]);
 });
 
+/* The contact address unlocks Unpaywall, and re-typing it on every run is how
+   it ends up never being set. Remembered in the browser rather than server-side:
+   it is the reader's own address, and the server keeps no per-user state. */
+const EMAIL_KEY = "citecheck.contactEmail";
+const emailField = $("contactEmail");
+
+/* Same shape as the server's check in `_email_arg`. Deliberately loose: it is
+   here to catch a typo, not to adjudicate RFC 5322. */
+const EMAIL_RE = /^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$/;
+
+function contactEmail() {
+  return (emailField?.value || "").trim();
+}
+
+/* The chip is the only place the page says whether Unpaywall is live, so it has
+   to track the field. A stale "off" while a good address sits in the box is the
+   same quiet failure the chip exists to prevent. */
+function reflectUnpaywall() {
+  const chip = $("capUnpaywall");
+  if (!chip) return;
+  const on = EMAIL_RE.test(contactEmail());
+  chip.classList.toggle("on", on);
+  chip.classList.toggle("off", !on);
+  chip.lastChild.textContent = on ? "Unpaywall on" : "Unpaywall off";
+}
+
+function rememberEmail() {
+  try {
+    const value = contactEmail();
+    if (value) localStorage.setItem(EMAIL_KEY, value);
+    else localStorage.removeItem(EMAIL_KEY);
+  } catch { /* private windows and blocked site data both land here */ }
+}
+
+if (emailField) {
+  try {
+    emailField.value = localStorage.getItem(EMAIL_KEY) || "";
+  } catch { /* nothing saved is a fine starting state */ }
+  emailField.addEventListener("input", () => {
+    emailField.classList.remove("bad");
+    reflectUnpaywall();
+  });
+  // On blur rather than on every keystroke, and again at upload: an address
+  // typed into settings should still be there tomorrow even if no run followed.
+  emailField.addEventListener("change", rememberEmail);
+  reflectUnpaywall();
+}
+
 async function startRun(file) {
   if (!file.name.toLowerCase().endsWith(".pdf")) {
     return showError("That doesn't look like a PDF.");
   }
+  if (contactEmail() && !EMAIL_RE.test(contactEmail())) {
+    emailField.classList.add("bad");
+    return showError("That contact email doesn't look right — fix it, or clear it to run without Unpaywall.");
+  }
   hideError();
+  rememberEmail();
 
   const body = new FormData();
   body.append("pdf", file);
@@ -77,6 +130,7 @@ async function startRun(file) {
   body.append("workers", $("workers").value);
   body.append("use_model", $("useModel").checked && !$("useModel").disabled ? "1" : "0");
   body.append("screenshots", $("useShots").checked && !$("useShots").disabled ? "1" : "0");
+  body.append("contact_email", contactEmail());
 
   show("progress");
   $("progressTitle").textContent = file.name;
@@ -523,6 +577,7 @@ async function runRecheck(key, file, claimIndex = null) {
   if (file) body.append("source", file);
   body.append("use_model", $("useModel").checked && !$("useModel").disabled ? "1" : "0");
   body.append("screenshots", $("useShots").checked && !$("useShots").disabled ? "1" : "0");
+  body.append("contact_email", EMAIL_RE.test(contactEmail()) ? contactEmail() : "");
 
   try {
     const res = await fetch(`/api/recheck/${currentRun}`, { method: "POST", body });

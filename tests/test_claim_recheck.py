@@ -284,7 +284,7 @@ class BarrenClaimRecheckTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def recheck(self, claim_index=1):
-        def dead(_reference):
+        def dead(_reference, _contact_email=""):
             raise ConnectionError("publisher unreachable")
 
         pipeline.resolve.resolve = dead
