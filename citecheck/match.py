@@ -501,8 +501,118 @@ _JUDGE_SYSTEM = (
 )
 
 
-def openai_available() -> bool:
-    if not os.environ.get("OPENAI_API_KEY"):
+@dataclass(frozen=True)
+class Provider:
+    """An LLM service reachable through the OpenAI-compatible chat API.
+
+    Nearly every hosted model now speaks that API alongside its own, so one
+    client covers all of them; what differs is where to send the call, what to
+    call the model, and how much of the request each one honours.
+    """
+
+    id: str
+    label: str
+    base_url: str          # empty means the SDK default (api.openai.com)
+    default_model: str
+    key_hint: str
+    # How far the service goes in enforcing the verdict's shape: "json_schema"
+    # (strict structured output), "json_object" (valid JSON, shape unenforced)
+    # or "none" (the prompt asks for JSON and the reply is parsed leniently).
+    # Only the starting point — a service that rejects it is stepped down.
+    response_format: str = "json_schema"
+    # OpenAI honours temperature, top_p and seed together. Others reject the
+    # combination (Anthropic will not take temperature and top_p at once) or
+    # ignore seed, so they get temperature alone.
+    full_sampling: bool = False
+    # Anthropic requires an output cap; OpenAI's reasoning models reject this
+    # parameter by name, so it is only sent where it is needed.
+    max_tokens: int = 0
+
+
+# Default models are starting points the user can overwrite in the page; they
+# are named here only so a blank model field does something sensible.
+PROVIDERS: dict[str, Provider] = {p.id: p for p in (
+    Provider("openai", "OpenAI", "", "gpt-4o", "sk-...", full_sampling=True),
+    Provider("anthropic", "Anthropic (Claude)", "https://api.anthropic.com/v1/",
+             "claude-sonnet-5", "sk-ant-...", response_format="none", max_tokens=1024),
+    Provider("gemini", "Google Gemini",
+             "https://generativelanguage.googleapis.com/v1beta/openai/",
+             "gemini-2.5-flash", "AIza..."),
+    Provider("mistral", "Mistral", "https://api.mistral.ai/v1",
+             "mistral-large-latest", "API key"),
+    Provider("deepseek", "DeepSeek", "https://api.deepseek.com",
+             "deepseek-chat", "sk-...", response_format="json_object"),
+    Provider("groq", "Groq", "https://api.groq.com/openai/v1",
+             "llama-3.3-70b-versatile", "gsk_...", response_format="json_object"),
+    Provider("openrouter", "OpenRouter (any model)", "https://openrouter.ai/api/v1",
+             "openai/gpt-4o", "sk-or-..."),
+    Provider("custom", "Other OpenAI-compatible endpoint", "", "", "API key",
+             response_format="json_object"),
+)}
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    """Which model a run is judged by, and on whose account.
+
+    Everything blank means the operator's configuration: OPENAI_API_KEY,
+    OPENAI_BASE_URL and CITECHECK_OPENAI_MODEL. A run carries its own copy
+    rather than writing into the environment, where a concurrent run would pick
+    it up and spend someone else's key.
+    """
+
+    provider: str = "openai"
+    api_key: str = field(default="", repr=False)
+    model: str = ""
+    base_url: str = ""          # only read for the "custom" provider
+
+    @property
+    def spec(self) -> Provider:
+        return PROVIDERS.get(self.provider, PROVIDERS["openai"])
+
+    @property
+    def uses_server_key(self) -> bool:
+        """The run brought no key, so the operator's OpenAI setup applies."""
+        return self.spec.id == "openai" and not self.api_key
+
+    def key(self) -> str:
+        if self.api_key:
+            return self.api_key
+        if self.uses_server_key:
+            return os.environ.get("OPENAI_API_KEY", "")
+        # A local server (Ollama, LM Studio) usually wants no key at all, but
+        # the SDK refuses to build a client without one.
+        return "not-needed" if self.spec.id == "custom" and self.base_url else ""
+
+    def endpoint(self) -> str | None:
+        if self.spec.id == "custom":
+            return self.base_url or None
+        if self.uses_server_key:
+            # The operator's gateway belongs with the operator's key; a user's
+            # own OpenAI key goes to OpenAI.
+            return os.environ.get("OPENAI_BASE_URL") or None
+        return self.spec.base_url or None
+
+    def model_name(self) -> str:
+        if self.model:
+            return self.model
+        if self.spec.id == "openai":
+            return (os.environ.get("CITECHECK_OPENAI_MODEL") or "").strip() or DEFAULT_MODEL
+        return self.spec.default_model
+
+    def label(self) -> str:
+        """How a report names what judged it, e.g. "Anthropic (Claude) · claude-sonnet-5"."""
+        if self.spec.id == "custom":
+            from urllib.parse import urlparse
+            host = urlparse(self.base_url).hostname or "custom endpoint"
+            return f"{self.model_name()} at {host}"
+        return f"{self.spec.label} · {self.model_name()}" if self.model_name() else self.spec.label
+
+
+def openai_available(llm: "LLMConfig | None" = None) -> bool:
+    """Whether the model tier can be called under *llm* (default: the server's)."""
+    llm = llm or LLMConfig()
+    if not llm.key() or not llm.model_name():
         return False
     try:
         import openai  # noqa: F401
@@ -511,7 +621,7 @@ def openai_available() -> bool:
     return True
 
 
-def active_engine() -> str:
+def active_engine(llm: "LLMConfig | None" = None) -> str:
     """Which judging tier is *available* to run — not which one produced a verdict.
 
     A key that is present but rejected still reports "openai" here, because this
@@ -519,15 +629,37 @@ def active_engine() -> str:
     is made. What actually judged a run is a separate question, answered after
     the fact by `pipeline.run` from the per-reference engines.
 
-    CITECHECK_LLM=off forces the lexical tier and skips the model entirely.
+    "openai" names the tier — a model reached through the OpenAI-compatible API —
+    not the vendor: a run judged by Claude or Gemini reports it too, and names
+    the model in its run settings. The id stays because saved reports carry it.
+
+    CITECHECK_LLM=off forces the lexical tier and skips the model entirely,
+    even for a run that brought its own key: it is the operator's switch.
     """
-    if (os.environ.get("CITECHECK_LLM") or "").strip().lower() == "off":
+    if llm_forced_off():
         return "lexical"
-    return "openai" if openai_available() else "lexical"
+    return "openai" if openai_available(llm) else "lexical"
+
+
+def llm_forced_off() -> bool:
+    """Whether the operator has switched the model tier off for every run."""
+    return (os.environ.get("CITECHECK_LLM") or "").strip().lower() == "off"
 
 
 def llm_available() -> bool:
     return active_engine() != "lexical"
+
+
+DEFAULT_MODEL = "gpt-4o"
+
+
+def model_name(llm: "LLMConfig | None" = None) -> str:
+    """The model the judging tier will call, as configured.
+
+    A name, not a dated snapshot: a hosted model behind the same name can be
+    revised, which is why a run records this alongside the date it ran.
+    """
+    return (llm or LLMConfig()).model_name()
 
 
 # Judging the same citation twice has to give the same answer. At the API's
@@ -539,34 +671,72 @@ def llm_available() -> bool:
 _SAMPLING = {"temperature": 0, "top_p": 1, "seed": 20240516}
 
 
-def _complete(client, model: str, prompt: str):
+# Written into the prompt only when the service will not enforce the schema,
+# so the strict OpenAI path sends exactly what it always has.
+_JSON_INSTRUCTION = (
+    "\n\nReply with a single JSON object and nothing else, with these keys: "
+    '"verdict" (one of "supported", "related", "weak", "unrelated", "unverified"), '
+    '"confidence" (a number from 0 to 1), "reason" (one or two sentences) and '
+    '"evidence_quote" (a verbatim sentence from the source, or "" if none).'
+)
+
+_FORMAT_STEPS = ("json_schema", "json_object", "none")
+
+
+def _complete(client, model: str, prompt: str, spec: "Provider | None" = None):
     """One judging call, with sampling pinned wherever the model allows it.
 
     The model is configurable, and reasoning models reject `temperature`
     outright rather than ignoring it. A rejection falls back to a plain call —
     losing determinism is bad, but failing the reference over it is worse.
+
+    Services differ in how far they enforce the verdict's shape, so the call
+    starts at the provider's strongest supported mode and steps down — strict
+    schema, then plain JSON mode, then a prompt that asks for JSON — whenever
+    the service rejects the one it was sent.
     """
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": _JUDGE_SYSTEM},
-            {"role": "user", "content": prompt},
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "citation_verdict",
-                "strict": True,
-                "schema": _JUDGE_SCHEMA,
-            },
-        },
-    }
-    try:
-        return client.chat.completions.create(**body, **_SAMPLING)
-    except Exception as exc:
-        if not _rejects_sampling(exc):
-            raise
-        return client.chat.completions.create(**body)
+    spec = spec or PROVIDERS["openai"]
+    sampling = _SAMPLING if spec.full_sampling else {"temperature": 0}
+    for mode in _FORMAT_STEPS[_FORMAT_STEPS.index(spec.response_format):]:
+        system = _JUDGE_SYSTEM if mode == "json_schema" else _JUDGE_SYSTEM + _JSON_INSTRUCTION
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        if mode == "json_schema":
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "citation_verdict",
+                    "strict": True,
+                    "schema": _JUDGE_SCHEMA,
+                },
+            }
+        elif mode == "json_object":
+            body["response_format"] = {"type": "json_object"}
+        if spec.max_tokens:
+            body["max_tokens"] = spec.max_tokens
+        try:
+            try:
+                return client.chat.completions.create(**body, **sampling)
+            except Exception as exc:
+                if not _rejects_sampling(exc):
+                    raise
+                return client.chat.completions.create(**body)
+        except Exception as exc:
+            if mode == "none" or not _rejects_format(exc):
+                raise
+    raise AssertionError("unreachable: the last format step re-raises")
+
+
+def _rejects_format(exc: Exception) -> bool:
+    """Whether *exc* is the service refusing the requested output format."""
+    text = str(exc).lower()
+    return any(p in text for p in ("response_format", "json_schema", "json_object",
+                                   "structured output", "response format"))
 
 
 def _rejects_sampling(exc: Exception) -> bool:
@@ -579,8 +749,67 @@ def _rejects_sampling(exc: Exception) -> bool:
     text = str(exc).lower()
     named = any(p in text for p in ("temperature", "top_p", "seed"))
     return named and any(
-        m in text for m in ("unsupported", "not supported", "unrecognized", "does not support")
+        m in text for m in ("unsupported", "not supported", "unrecognized",
+                            "does not support", "cannot both", "cannot be used",
+                            "not allowed")
     )
+
+
+def _parse_json(text: str):
+    """The verdict object out of a reply, tolerating the wrapping models add.
+
+    Only the strict path is guaranteed bare JSON. Elsewhere a model may fence it
+    in a code block or say a word first, and a reference is not worth failing
+    over that.
+    """
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    first, last = text.find("{"), text.rfind("}")
+    if first == -1 or last <= first:
+        raise ValueError("no JSON object in the reply")
+    return json.loads(text[first:last + 1])
+
+
+def check_connection(llm: "LLMConfig") -> str:
+    """One tiny call to confirm the key, model and endpoint work. "" means they do.
+
+    Returns a reader-facing sentence otherwise. Never includes the key: provider
+    messages can quote part of it, so only the error type is interpreted.
+    """
+    try:
+        import openai
+    except ImportError:
+        return "The openai package is not installed on this server."
+    if not llm.key():
+        return "Add an API key first."
+    try:
+        client = openai.OpenAI(api_key=llm.key(), base_url=llm.endpoint(),
+                               timeout=30, max_retries=0)
+        body = {"model": llm.model_name(),
+                "messages": [{"role": "user", "content": "Reply with the word OK."}]}
+        if llm.spec.max_tokens:
+            body["max_tokens"] = 16
+        client.chat.completions.create(**body)
+    except openai.AuthenticationError:
+        return f"{llm.spec.label} rejected this API key."
+    except openai.PermissionDeniedError:
+        return f"This key is not allowed to use {llm.model_name()}."
+    except openai.NotFoundError:
+        return f"{llm.spec.label} has no model called {llm.model_name()!r} — check the model name."
+    except openai.RateLimitError:
+        return f"{llm.spec.label} says this key is out of quota or rate-limited."
+    except openai.APIConnectionError:
+        return f"Could not reach {llm.endpoint() or 'api.openai.com'}."
+    except openai.BadRequestError:
+        # A bare "OK" prompt only fails on the request itself, which is almost
+        # always a model name the service does not recognise.
+        return f"{llm.spec.label} refused the request — check the model name."
+    except Exception as exc:
+        return f"The test call failed ({type(exc).__name__})."
+    return ""
 
 
 def openai_match(
@@ -590,13 +819,16 @@ def openai_match(
     reference_line: str = "",
     abstract: str = "",
     model: str | None = None,
+    llm: LLMConfig | None = None,
 ) -> MatchResult | None:
     """Ask the model to judge the citation. Returns None if the call is unusable.
 
     Honours OPENAI_BASE_URL, so this also covers Azure-style gateways and local
-    OpenAI-compatible servers.
+    OpenAI-compatible servers. *llm* is the provider, key and model the run
+    brought with it; None means the server's own OpenAI configuration.
     """
-    if not openai_available():
+    llm = llm or LLMConfig()
+    if not openai_available(llm):
         return None
 
     import openai
@@ -608,12 +840,12 @@ def openai_match(
     if len(excerpt.strip()) < 120 and len((abstract or "").strip()) < 120:
         return None
 
-    model = model or os.environ.get("CITECHECK_OPENAI_MODEL") or "gpt-4o"
+    model = model or llm.model_name()
     prompt = _judge_prompt(claim, reference_line, title, abstract, excerpt)
 
     try:
-        client = openai.OpenAI(base_url=os.environ.get("OPENAI_BASE_URL") or None)
-        response = _complete(client, model, prompt)
+        client = openai.OpenAI(api_key=llm.key(), base_url=llm.endpoint())
+        response = _complete(client, model, prompt, llm.spec)
     except Exception as exc:
         return MatchResult(
             engine="openai-error",
@@ -630,7 +862,9 @@ def openai_match(
         )
 
     try:
-        data = json.loads(choice.message.content or "")
+        data = _parse_json(choice.message.content or "")
+        if not isinstance(data, dict):
+            return None
     except (ValueError, TypeError):
         return None
 
@@ -672,6 +906,7 @@ def _second_look(
     source_text: str,
     title: str,
     reference_line: str,
+    llm: LLMConfig | None = None,
 ) -> MatchResult | None:
     """Re-judge a harsh verdict against the cited work's own abstract.
 
@@ -692,7 +927,8 @@ def _second_look(
     if abstract == (source_text or "").strip():
         return None
     return openai_match(
-        claim, abstract, title=title, reference_line=reference_line, abstract=abstract
+        claim, abstract, title=title, reference_line=reference_line, abstract=abstract,
+        llm=llm,
     )
 
 
@@ -704,6 +940,7 @@ def judge(
     reference_line: str = "",
     use_model: bool = True,
     max_claims: int = 6,
+    llm: LLMConfig | None = None,
 ) -> MatchResult:
     """Judge every citing sentence separately, then roll up to one verdict.
 
@@ -729,7 +966,7 @@ def judge(
     claim_list = _as_claims(claims)
     lexical = lexical_match(claim_list, source_text, title=title, abstract=abstract)
 
-    engine = active_engine() if use_model else "lexical"
+    engine = active_engine(llm) if use_model else "lexical"
     if engine == "lexical" or not claim_list:
         return lexical
 
@@ -743,14 +980,16 @@ def judge(
     for index, claim in enumerate(capped):
         result = openai_match(
             claim, source_text, title=title, reference_line=reference_line,
-            abstract=abstract,
+            abstract=abstract, llm=llm,
         )
         if result is not None and "-" in result.engine:   # "<engine>-error" / "-refusal"
             failure = result
             result = None
 
         if result is not None and result.verdict in _NEEDS_CONFIRMING:
-            again = _second_look(claim, abstract, source_text, title, reference_line)
+            again = _second_look(
+                claim, abstract, source_text, title, reference_line, llm=llm
+            )
             if (
                 again is not None
                 and "-" not in again.engine

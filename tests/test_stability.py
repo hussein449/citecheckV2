@@ -511,7 +511,7 @@ class UnjudgedClaimsAreKeptTest(unittest.TestCase):
         calls = iter(verdicts)
 
         def fake_match(claim, source_text, title="", reference_line="",
-                       abstract="", model=None):
+                       abstract="", model=None, llm=None):
             verdict = next(calls, None)
             if verdict is None:
                 return None
@@ -522,7 +522,7 @@ class UnjudgedClaimsAreKeptTest(unittest.TestCase):
 
         real_match, real_engine = match.openai_match, match.active_engine
         match.openai_match = fake_match
-        match.active_engine = lambda: "openai"
+        match.active_engine = lambda llm=None: "openai"
         try:
             return match.judge(self.CLAIMS, self.SOURCE, title="Last mile freight")
         finally:

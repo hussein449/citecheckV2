@@ -65,18 +65,83 @@ fileInput.addEventListener("change", () => {
   if (fileInput.files?.[0]) startRun(fileInput.files[0]);
 });
 
-/* The contact address unlocks Unpaywall, and re-typing it on every run is how
-   it ends up never being set. Remembered in the browser rather than server-side:
-   it is the reader's own address, and the server keeps no per-user state. */
-const EMAIL_KEY = "citecheck.contactEmail";
+/* ── Advanced settings ───────────────────────────────────────
+   Every field starts at the default the page was served with. "Save settings"
+   remembers the ones the reader changed — only those, so a field they never
+   touched keeps following the server's default — and tests the AI provider
+   with one tiny call, so a bad key or model name shows up now rather than as
+   a run that quietly fell back to word overlap. "Reset to defaults" forgets it
+   all. A run always uses what is on screen, saved or not. */
+const SETTINGS_KEY = "citecheck.settings";
+const API_KEY_KEY = "citecheck.apiKey";
+const LEGACY_EMAIL_KEY = "citecheck.contactEmail";
+
 const emailField = $("contactEmail");
+const keyField = $("apiKey");
+const rememberBox = $("rememberKey");
+const modelBox = $("useModel");
+const providerField = $("provider");
+const modelField = $("model");
+const baseUrlField = $("baseUrl");
+const settingsStatus = $("settingsStatus");
+const envHasKey = modelBox?.dataset.env === "1";
 
 /* Same shape as the server's check in `_email_arg`. Deliberately loose: it is
    here to catch a typo, not to adjudicate RFC 5322. */
 const EMAIL_RE = /^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$/;
+/* Same shapes as the server's checks in `_llm_arg`. */
+const API_KEY_RE = /^[\x21-\x7e]{20,300}$/;
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,119}$/;
+
+/* The non-secret fields, by element id. The key is handled separately: it is a
+   secret, and by default lives only as long as the tab. */
+const FIELDS = ["maxRefs", "workers", "useModel", "useShots", "contactEmail",
+                "provider", "model", "baseUrl"].filter((id) => $(id));
+
+function readField(id) {
+  const el = $(id);
+  return el.type === "checkbox" ? el.checked : el.value;
+}
+
+function writeField(id, value) {
+  const el = $(id);
+  if (el.type === "checkbox") el.checked = !!value;
+  else el.value = value;
+}
+
+// Captured before anything saved is applied: this is what "default" means.
+const DEFAULTS = Object.fromEntries(FIELDS.map((id) => [id, readField(id)]));
 
 function contactEmail() {
   return (emailField?.value || "").trim();
+}
+
+function apiKey() {
+  return (keyField?.value || "").trim();
+}
+
+function provider() {
+  return providerField?.value || "openai";
+}
+
+function providerOption() {
+  return providerField?.selectedOptions[0];
+}
+
+/* Whether a run started now could be judged by a model — the same rule the
+   server applies in `LLMConfig.key()`. */
+function modelReady() {
+  if (!providerField) return envHasKey;
+  const p = provider();
+  if (p === "custom") {
+    return !!(baseUrlField.value.trim() && MODEL_RE.test(modelField.value.trim()));
+  }
+  if (API_KEY_RE.test(apiKey())) return true;
+  return p === "openai" && envHasKey;
+}
+
+function usesOwnAccount() {
+  return provider() !== "openai" || API_KEY_RE.test(apiKey());
 }
 
 /* The chip is the only place the page says whether Unpaywall is live, so it has
@@ -91,38 +156,201 @@ function reflectUnpaywall() {
   chip.lastChild.textContent = on ? "Unpaywall on" : "Unpaywall off";
 }
 
-function rememberEmail() {
-  try {
-    const value = contactEmail();
-    if (value) localStorage.setItem(EMAIL_KEY, value);
-    else localStorage.removeItem(EMAIL_KEY);
-  } catch { /* private windows and blocked site data both land here */ }
+/* The engine chip, the model checkbox and the provider fields have to follow
+   what is typed, or the page says "lexical" while a run it starts is judged by
+   a model — or the reverse. `fromUser` is false while saved settings are being
+   applied, so loading them does not tick a box the reader had unticked. */
+function reflectModel(fromUser = true) {
+  if (!providerField || !modelBox) return;
+  const option = providerOption();
+  const p = provider();
+  const ready = modelReady();
+
+  $("baseUrlRow").hidden = p !== "custom";
+  modelField.placeholder = option.dataset.defaultModel || "model name";
+  $("modelHint").textContent = p === "custom"
+    ? "Required — the model name your endpoint serves."
+    : `Leave blank for ${option.dataset.defaultModel}.`;
+  const serverKey = p === "openai" && envHasKey;
+  keyField.placeholder = serverKey ? "using the key set on this server" : option.dataset.keyHint;
+  $("apiKeyLabel").textContent = serverKey ? "API key — optional"
+    : p === "custom" ? "API key — if your endpoint needs one"
+    : `${option.textContent.trim()} API key`;
+
+  const wasDisabled = modelBox.disabled;
+  modelBox.disabled = !ready;
+  if (!ready) modelBox.checked = false;
+  else if (wasDisabled && fromUser) modelBox.checked = true;
+  $("useModelHint").textContent = ready
+    ? `Each citing sentence is judged separately${usesOwnAccount() ? ", on your account" : ""}. Falls back to lexical scoring on failure.`
+    : p === "openai" ? "Add an API key below to enable."
+    : p === "custom" ? "Add the endpoint URL and model name below to enable."
+    : `Add your ${option.textContent.trim()} API key below to enable.`;
+
+  const chip = $("capEngine");
+  if (chip) {
+    chip.classList.toggle("on", ready);
+    chip.classList.toggle("off", !ready);
+    chip.lastChild.textContent = ready && usesOwnAccount()
+      ? `AI judging · ${p === "custom" ? "custom endpoint" : option.textContent.replace(/\s*\(.*\)$/, "").trim()}`
+      : chip.dataset.label;
+  }
 }
 
-if (emailField) {
+function setStatus(text, tone = "") {
+  if (!settingsStatus) return;
+  settingsStatus.textContent = text;
+  settingsStatus.className = `settings-status ${tone}`.trim();
+}
+
+function keyStore(persist) {
+  return persist ? localStorage : sessionStorage;
+}
+
+function loadSettings() {
+  let saved = {};
   try {
-    emailField.value = localStorage.getItem(EMAIL_KEY) || "";
+    saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") || {};
+    // Addresses saved before settings were saved as a whole.
+    const legacy = localStorage.getItem(LEGACY_EMAIL_KEY);
+    if (legacy && !("contactEmail" in saved)) saved.contactEmail = legacy;
   } catch { /* nothing saved is a fine starting state */ }
-  emailField.addEventListener("input", () => {
-    emailField.classList.remove("bad");
-    reflectUnpaywall();
-  });
-  // On blur rather than on every keystroke, and again at upload: an address
-  // typed into settings should still be there tomorrow even if no run followed.
-  emailField.addEventListener("change", rememberEmail);
+  for (const [id, value] of Object.entries(saved)) {
+    if (FIELDS.includes(id) && id !== "useModel") writeField(id, value);
+  }
+  if (keyField) {
+    try {
+      const kept = localStorage.getItem(API_KEY_KEY);
+      rememberBox.checked = !!kept;
+      keyField.value = kept || sessionStorage.getItem(API_KEY_KEY) || "";
+    } catch { /* storage blocked */ }
+  }
+  reflectModel(false);
+  // Applied last: whether the box can be ticked depends on the fields above.
+  if ("useModel" in saved && !modelBox?.disabled) modelBox.checked = !!saved.useModel;
   reflectUnpaywall();
 }
+
+/* Mark the field and say what is wrong, or return true. */
+function validateSettings() {
+  document.querySelectorAll(".settings-grid .bad").forEach((el) => el.classList.remove("bad"));
+  const fail = (el, message) => { el?.classList.add("bad"); setStatus(message, "bad"); return false; };
+  if (contactEmail() && !EMAIL_RE.test(contactEmail())) {
+    return fail(emailField, "That contact email doesn't look right — fix it, or clear it.");
+  }
+  if (!providerField) return true;
+  if (apiKey() && !API_KEY_RE.test(apiKey())) {
+    return fail(keyField, "That API key doesn't look right — check it was pasted whole, or clear it.");
+  }
+  const model = modelField.value.trim();
+  if (model && !MODEL_RE.test(model)) {
+    return fail(modelField, "That model name doesn't look right.");
+  }
+  if (provider() === "custom") {
+    if (!/^https?:\/\/\S+$/.test(baseUrlField.value.trim())) {
+      return fail(baseUrlField, "Add the endpoint URL, starting with https://.");
+    }
+    if (!model) return fail(modelField, "Add the model name your endpoint serves.");
+  } else if (provider() !== "openai" && !apiKey()) {
+    return fail(keyField, `Add your ${providerOption().textContent.trim()} API key.`);
+  }
+  return true;
+}
+
+/* Provider, model, endpoint and key, only when the model will be used: a key
+   the run will not spend has no business crossing the wire. */
+function appendLlmFields(body) {
+  if (!providerField || !modelBox?.checked || modelBox.disabled) return;
+  body.append("provider", provider());
+  body.append("model", modelField.value.trim());
+  if (provider() === "custom") body.append("base_url", baseUrlField.value.trim());
+  if (API_KEY_RE.test(apiKey())) body.append("api_key", apiKey());
+}
+
+function saveKey() {
+  if (!keyField) return;
+  try {
+    const persist = rememberBox.checked;
+    // Clear the other store too, so unticking "remember" really forgets it.
+    keyStore(!persist).removeItem(API_KEY_KEY);
+    if (apiKey()) keyStore(persist).setItem(API_KEY_KEY, apiKey());
+    else keyStore(persist).removeItem(API_KEY_KEY);
+  } catch { /* storage blocked: the key still works for this page */ }
+}
+
+async function saveSettings() {
+  if (!validateSettings()) return;
+  const changed = {};
+  for (const id of FIELDS) {
+    const value = readField(id);
+    if (value !== DEFAULTS[id]) changed[id] = id === "contactEmail" ? value.trim() : value;
+  }
+  try {
+    if (Object.keys(changed).length) localStorage.setItem(SETTINGS_KEY, JSON.stringify(changed));
+    else localStorage.removeItem(SETTINGS_KEY);
+    localStorage.removeItem(LEGACY_EMAIL_KEY);
+  } catch { /* storage blocked: the settings still apply to this page */ }
+  saveKey();
+
+  // Only a key or endpoint the reader brought is worth testing — the server's
+  // own configuration is the operator's to check, and costs them each time.
+  if (!(modelBox?.checked && !modelBox.disabled && usesOwnAccount())) {
+    setStatus("Settings saved.", "ok");
+    return;
+  }
+  setStatus("Saved. Testing the connection…");
+  const body = new FormData();
+  body.append("use_model", "1");
+  appendLlmFields(body);
+  try {
+    const res = await fetch("/api/llm/check", { method: "POST", body });
+    const data = await res.json();
+    if (data.ok) setStatus(`Settings saved · ${data.label} is working.`, "ok");
+    else setStatus(`Settings saved, but the test call failed: ${data.error}`, "bad");
+  } catch {
+    setStatus("Settings saved, but the connection could not be tested.", "bad");
+  }
+}
+
+function resetSettings() {
+  for (const id of FIELDS) writeField(id, DEFAULTS[id]);
+  if (keyField) {
+    keyField.value = "";
+    rememberBox.checked = false;
+  }
+  try {
+    localStorage.removeItem(SETTINGS_KEY);
+    localStorage.removeItem(LEGACY_EMAIL_KEY);
+    localStorage.removeItem(API_KEY_KEY);
+    sessionStorage.removeItem(API_KEY_KEY);
+  } catch { /* nothing to forget */ }
+  document.querySelectorAll(".settings-grid .bad").forEach((el) => el.classList.remove("bad"));
+  reflectModel(false);
+  if (!modelBox?.disabled) modelBox.checked = DEFAULTS.useModel;
+  reflectUnpaywall();
+  setStatus("Defaults restored.", "ok");
+}
+
+document.querySelector(".settings-grid")?.addEventListener("input", (e) => {
+  e.target.classList.remove("bad");
+  if (e.target !== modelBox) reflectModel();
+  reflectUnpaywall();
+  setStatus("Unsaved changes.");
+});
+providerField?.addEventListener("change", () => reflectModel());
+$("saveSettings")?.addEventListener("click", saveSettings);
+$("resetSettings")?.addEventListener("click", resetSettings);
+loadSettings();
 
 async function startRun(file) {
   if (!file.name.toLowerCase().endsWith(".pdf")) {
     return showError("That doesn't look like a PDF.");
   }
-  if (contactEmail() && !EMAIL_RE.test(contactEmail())) {
-    emailField.classList.add("bad");
-    return showError("That contact email doesn't look right — fix it, or clear it to run without Unpaywall.");
+  if (!validateSettings()) {
+    document.querySelector("details.settings").open = true;
+    return showError(settingsStatus.textContent);
   }
   hideError();
-  rememberEmail();
 
   const body = new FormData();
   body.append("pdf", file);
@@ -131,6 +359,7 @@ async function startRun(file) {
   body.append("use_model", $("useModel").checked && !$("useModel").disabled ? "1" : "0");
   body.append("screenshots", $("useShots").checked && !$("useShots").disabled ? "1" : "0");
   body.append("contact_email", contactEmail());
+  appendLlmFields(body);
 
   show("progress");
   $("progressTitle").textContent = file.name;
@@ -215,6 +444,25 @@ function refreshResults() {
   renderCards();
 }
 
+/* What the verdicts rested on. Said next to the findings because a clean
+   banner over mostly abstracts is a weaker result than one over full papers,
+   and nothing else on the page tells the two apart. */
+const COVERAGE_LABEL = [
+  ["full_text", "full text"],
+  ["html_page", "publisher or landing page"],
+  ["abstract_only", "abstract only"],
+  ["supplied", "document you supplied"],
+  ["none", "nothing retrieved"],
+];
+
+function coverageSummary(coverage) {
+  if (!coverage) return "";
+  const parts = COVERAGE_LABEL
+    .filter(([key]) => coverage[key])
+    .map(([key, label]) => `${coverage[key]} ${label}`);
+  return parts.length ? `Evidence behind the verdicts: ${parts.join(" · ")}` : "";
+}
+
 /* The parts of the page that summarise the whole run: the banner, the tally,
    the filters, the meta line. Separated from the cards because a change to one
    reference moves all of these but only one card — and rebuilding 150 cards to
@@ -236,6 +484,10 @@ function refreshSummary() {
   const note = $("engineNote");
   note.hidden = !s.engine_note;
   note.textContent = s.engine_note || "";
+
+  const cover = $("coverageNote");
+  cover.textContent = coverageSummary(s.coverage);
+  cover.hidden = !cover.textContent;
 
   renderRisk(s.risk);
   renderTally(s);
@@ -300,7 +552,8 @@ function replaceCard(key) {
 function engineSummary(stats) {
   const judged = stats.references_judged_by_model || 0;
   if (!judged) return "judged by lexical overlap";
-  const label = ENGINE_LABEL[stats.engine] || stats.engine;
+  // Names the provider and model where the run recorded them (Claude, Gemini…).
+  const label = stats.llm_label || ENGINE_LABEL[stats.engine] || stats.engine;
   return `judged by ${label} (${judged} of ${stats.references_judgeable} references)`;
 }
 
@@ -578,6 +831,7 @@ async function runRecheck(key, file, claimIndex = null) {
   body.append("use_model", $("useModel").checked && !$("useModel").disabled ? "1" : "0");
   body.append("screenshots", $("useShots").checked && !$("useShots").disabled ? "1" : "0");
   body.append("contact_email", EMAIL_RE.test(contactEmail()) ? contactEmail() : "");
+  appendLlmFields(body);
 
   try {
     const res = await fetch(`/api/recheck/${currentRun}`, { method: "POST", body });

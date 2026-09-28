@@ -177,15 +177,33 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 /* The email is a sentence's worth of address plus a paragraph explaining why it
    matters, so it gets the full row rather than a 232px column. */
 .settings-grid label.wide { grid-column: 1 / -1; }
-.settings-grid input[type=email] {
+.settings-grid input[type=email],
+.settings-grid input[type=password],
+.settings-grid input[type=text],
+.settings-grid input[type=url],
+.settings-grid select {
   width: 100%; max-width: 340px; padding: 7px 10px; border-radius: 8px;
   border: 1px solid var(--line-strong); background: var(--surface);
   color: var(--ink); font: inherit;
 }
-.settings-grid input[type=email]:focus-visible {
+.settings-grid input[type=email]:focus-visible,
+.settings-grid input[type=password]:focus-visible,
+.settings-grid input[type=text]:focus-visible,
+.settings-grid input[type=url]:focus-visible,
+.settings-grid select:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent);
 }
-.settings-grid input[type=email].bad { border-color: var(--bad); }
+.settings-grid input.bad { border-color: var(--bad); }
+.settings-grid label[hidden] { display: none; }
+.settings-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line);
+}
+.settings-status { font-size: 13px; color: var(--ink-dim); }
+.settings-status.ok { color: var(--ok); }
+.settings-status.bad { color: var(--bad); }
+/* Belongs to the key field above it, so it sits tight under it. */
+.settings-grid label.remember { margin-top: -10px; }
 
 /* ── What it checks ─────────────────────────────────────── */
 .explain { margin: 40px 0 8px; }

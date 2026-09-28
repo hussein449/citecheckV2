@@ -42,6 +42,11 @@ class Options:
     # and OpenAlex serve self-identifying callers from a faster pool. Empty
     # falls back to CITECHECK_CONTACT_EMAIL.
     contact_email: str = ""
+    # The model this run is judged by and the key it is billed to, so a user
+    # can bring their own provider instead of spending the operator's. The
+    # default is the server's own OpenAI setup. The key is kept out of repr and
+    # never written to the report: it is a secret, and a report gets passed on.
+    llm: match.LLMConfig = field(default_factory=match.LLMConfig)
 
 
 @dataclass
@@ -153,9 +158,14 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
         # `engine` key below is overwritten once the run is done with what
         # actually produced the verdicts — the two differ whenever the key is
         # configured but rejected, and that difference is the whole point.
-        "engine_planned": match.active_engine() if options.use_model else "lexical",
+        "engine_planned": match.active_engine(options.llm) if options.use_model else "lexical",
+        "llm_label": options.llm.label(),
     }
     report.stats["engine"] = report.stats["engine_planned"]
+    # Everything a timing or coverage figure depends on, recorded with the run
+    # rather than reconstructed afterwards. Without it a report says how long a
+    # run took but not with how many workers, or which model judged it.
+    report.stats["run_config"] = run_config(options, started)
     # Measured ~5s of wall clock per reference at 4 workers, i.e. roughly 20s of
     # serial work each (resolve, fetch, judge, three screenshots) once network
     # waits are overlapped. Divide that serial cost by the worker count — using
@@ -258,6 +268,30 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
     save(run_dir, data)
     progress({"stage": "done", "message": "Finished.", "percent": 100, "report": data})
     return report
+
+
+def run_config(options: Options, started: float) -> dict:
+    """The settings a run was made under, for anyone reporting its numbers."""
+    from . import __version__
+
+    engine = match.active_engine(options.llm) if options.use_model else "lexical"
+    return {
+        "started_at": datetime.fromtimestamp(started).isoformat(timespec="seconds"),
+        "version": __version__,
+        "workers": max(1, options.workers),
+        "max_references": options.max_references,
+        "max_claims_per_reference": options.max_claims_per_reference,
+        "use_model": options.use_model,
+        "model": options.llm.model_name() if engine != "lexical" else "",
+        "provider": options.llm.spec.id if engine != "lexical" else "",
+        "screenshots": options.take_screenshots,
+        "contact_email_set": bool(options.contact_email or resolve.contact_email()),
+        # Whose key judged the run — never the key itself.
+        "api_key_source": (
+            "" if engine == "lexical"
+            else "environment" if options.llm.uses_server_key else "run"
+        ),
+    }
 
 
 def _split_out_of_range(
@@ -401,6 +435,7 @@ def summarise(report: dict) -> dict:
     stats["rechecked"] = rechecked
     stats["reviewed"] = reviewed
     stats["claims_reviewed"] = claims_reviewed
+    stats["coverage"] = coverage(references)
     stats.update(_engine_outcome(references, stats, derived))
     stats["risk"] = risk_summary(stats)
 
@@ -440,6 +475,42 @@ def _addressed(entry: dict) -> str:
         else "the citation indexes"
     )
     return f" — you have since re-checked {scope} against {against}."
+
+
+# What a verdict rested on, from the strongest evidence to none at all. A clean
+# report whose sources were mostly abstracts has been screened less thoroughly
+# than one whose sources were mostly full papers, and without this count a
+# reader cannot tell "nothing wrong was found" from "not much was checked".
+COVERAGE_CATEGORIES = ("full_text", "html_page", "abstract_only", "supplied", "none")
+
+# `fetch` labels what it retrieved; this groups those labels into the categories
+# above. An HTML page is kept apart from full text because it ranges from a
+# complete article to a landing page carrying little more than the abstract,
+# and nothing in the page says which.
+_COVERAGE_OF_KIND = {
+    "fulltext-xml": "full_text",
+    "pdf": "full_text",
+    "html": "html_page",
+    "abstract": "abstract_only",
+    "supplied pdf": "supplied",
+    "supplied text": "supplied",
+}
+
+
+def coverage_of(entry: dict) -> str:
+    """The evidence category one reference's verdict rested on."""
+    fetched = entry.get("fetched") or {}
+    if not fetched.get("text_chars"):
+        return "none"
+    return _COVERAGE_OF_KIND.get(fetched.get("kind") or "", "none")
+
+
+def coverage(references: list[dict]) -> dict[str, int]:
+    """How many references rested on each kind of evidence, every category present."""
+    counts = {category: 0 for category in COVERAGE_CATEGORIES}
+    for entry in references:
+        counts[coverage_of(entry)] += 1
+    return counts
 
 
 def verdicts_in(entry: dict) -> set[str]:
@@ -482,7 +553,7 @@ def _engine_outcome(references: list[dict], stats: dict, warnings: list[str]) ->
     eligible = [entry for entry in references if entry.get("engine")]
     judged = [entry for entry in eligible if entry["engine"] != "lexical"]
     planned = stats.get("engine_planned", "lexical")
-    named = _ENGINE_DISPLAY.get(planned, planned)
+    named = stats.get("llm_label") or _ENGINE_DISPLAY.get(planned, planned)
 
     outcome = {
         "engine": judged[0]["engine"] if judged else "lexical",
@@ -897,6 +968,7 @@ def _check_one(
         reference_line=reference.raw,
         use_model=options.use_model,
         max_claims=options.max_claims_per_reference,
+        llm=options.llm,
     )
     _apply_verdict(entry, verdict)
 
@@ -1410,6 +1482,7 @@ def _recheck_claim(
         reference_line=reference.raw,
         use_model=options.use_model,
         max_claims=1,
+        llm=options.llm,
     )
     fresh = (
         result.claim_verdicts[0].to_dict()
@@ -1651,6 +1724,7 @@ def _check_supplied(
         reference_line=reference.raw,
         use_model=options.use_model,
         max_claims=options.max_claims_per_reference,
+        llm=options.llm,
     )
     _apply_verdict(entry, verdict)
 

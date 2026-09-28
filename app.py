@@ -6,15 +6,19 @@ Run with:  python app.py     then open http://127.0.0.1:5000
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from flask import (
     Flask,
@@ -51,6 +55,71 @@ _LOCK = threading.Lock()
 # them running at once would lose whichever finished first.
 _RECHECK_LOCK = threading.Lock()
 
+# How long an uploaded manuscript and everything derived from it — the report,
+# and captures of the manuscript's own pages — may stay on disk. Unpublished
+# papers are confidential, and a server that keeps every one it was ever handed
+# is holding material nobody asked it to hold. Unset or 0 keeps everything,
+# which is right for a single user's own machine; any shared deployment should
+# set it.
+def _retention_hours() -> float:
+    try:
+        return max(0.0, float(os.environ.get("CITECHECK_RETENTION_HOURS") or 0))
+    except ValueError:
+        return 0.0
+
+
+_RETENTION_HOURS = _retention_hours()
+
+
+def _running(run_id: str) -> bool:
+    state = _RUNS.get(run_id)
+    return state is not None and not state.get("done")
+
+
+def _delete_run(run_id: str) -> None:
+    """Remove a run's report, evidence images and uploaded manuscript."""
+    shutil.rmtree(RUNS_DIR / run_id, ignore_errors=True)
+    for upload in UPLOADS_DIR.glob(f"{run_id}_*"):
+        try:
+            upload.unlink()
+        except OSError:
+            pass
+    with _LOCK:
+        _RUNS.pop(run_id, None)
+
+
+def purge_expired(now: float | None = None, hours: float | None = None) -> list[str]:
+    """Delete every finished run older than the retention period.
+
+    Only names the server itself generated are touched, so nothing else that
+    happens to sit in these directories can be swept up. A run still in progress
+    is never deleted, however old its directory is.
+    """
+    hours = _RETENTION_HOURS if hours is None else hours
+    if hours <= 0:
+        return []
+    cutoff = (time.time() if now is None else now) - hours * 3600
+
+    # Measured from a run's most recent activity, not its creation: a report
+    # re-checked this morning is still in use however old its upload is.
+    latest: dict[str, float] = {}
+    for path in list(RUNS_DIR.iterdir()) + list(UPLOADS_DIR.iterdir()):
+        run_id = path.name[:22]
+        if not _RUN_ID.fullmatch(run_id) or _running(run_id):
+            continue
+        for item in (path, path / "report.json"):
+            try:
+                stamp = item.stat().st_mtime
+            except OSError:
+                continue
+            latest[run_id] = max(latest.get(run_id, 0.0), stamp)
+
+    stale = sorted(run_id for run_id, stamp in latest.items() if stamp < cutoff)
+    for run_id in stale:
+        _delete_run(run_id)
+    return stale
+
+
 # Launching a browser takes a moment, so probe once at import and reuse.
 _SHOTS_OK, _SHOTS_DETAIL = shots.browser_status()
 
@@ -73,7 +142,27 @@ def _capabilities() -> dict:
         "screenshot_detail": _SHOTS_DETAIL,
         "max_upload_mb": MAX_UPLOAD_MB,
         "contact_email": bool(resolve.contact_email()),
+        "retention_hours": _RETENTION_HOURS,
+        # Whether a key typed into the page could switch the model tier on. Not
+        # when the operator forced it off, and not without the SDK installed.
+        "user_key": not match.llm_forced_off() and _openai_installed(),
+        # For the provider picker: what each one is called, what its key looks
+        # like and which model a blank model field falls back to.
+        "providers": [
+            {"id": p.id, "label": p.label, "key_hint": p.key_hint,
+             "default_model": match.model_name() if p.id == "openai" else p.default_model}
+            for p in match.PROVIDERS.values()
+        ],
+        "local_llm": _ALLOW_LOCAL_LLM,
     }
+
+
+def _openai_installed() -> bool:
+    try:
+        import openai  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 # One shared password, for when the app is reachable from outside localhost.
@@ -133,6 +222,13 @@ def upload():
     email, complaint = _email_arg()
     if complaint:
         return jsonify({"error": complaint}), 400
+    llm, complaint = _llm_arg()
+    if complaint:
+        return jsonify({"error": complaint}), 400
+
+    # Swept on upload rather than on a timer: a server nobody uses holds nothing
+    # new, and one that is in use sweeps as often as it takes in manuscripts.
+    purge_expired()
 
     run_id = f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
     run_dir = RUNS_DIR / run_id
@@ -148,6 +244,7 @@ def upload():
         take_screenshots=request.form.get("screenshots", "1") != "0",
         workers=_int_arg("workers", 4, 1, 8),
         contact_email=email,
+        llm=llm,
     )
 
     with _LOCK:
@@ -196,6 +293,104 @@ def _email_arg() -> tuple[str, str]:
         # exists precisely because the field can hold something enormous.
         return "", f"{raw[:80]!r} is not an email address."
     return raw, ""
+
+
+# Printable ASCII with no spaces: every provider key shape seen so far (sk-...,
+# sk-ant-..., AIza..., gsk_...) fits it. Only a paste accident — a stray
+# newline, a quote, half a sentence — does not.
+_API_KEY_RE = re.compile(r"^[!-~]{20,300}$")
+# Model ids across providers: "gpt-4o", "claude-sonnet-5",
+# "meta-llama/llama-3.3-70b-instruct:free", "models/gemini-2.5-flash".
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,119}$")
+
+# A custom endpoint is a URL the server will call on the user's say-so. On a
+# public deployment that would let anyone aim it at the machine's own network,
+# so by default only public https hosts are allowed. Running locally against
+# Ollama or LM Studio is opted into explicitly.
+_ALLOW_LOCAL_LLM = os.environ.get("CITECHECK_ALLOW_LOCAL_LLM", "") == "1"
+
+
+def _endpoint_complaint(url: str) -> str:
+    """Why *url* may not be used as a custom LLM endpoint, or "" if it may."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "That endpoint URL is not a valid address."
+    if parsed.scheme not in ("https", "http") or not parsed.hostname:
+        return "The endpoint URL must start with https://."
+    if parsed.username or parsed.password:
+        return "Put the key in the API key field, not in the endpoint URL."
+    if _ALLOW_LOCAL_LLM:
+        return ""
+    if parsed.scheme != "https":
+        return "The endpoint URL must use https://."
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or 443)
+    except (socket.gaierror, UnicodeError):
+        return f"Could not find the host {parsed.hostname!r}."
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not address.is_global:
+            return ("That endpoint is on a private network. To use a local model "
+                    "server, set CITECHECK_ALLOW_LOCAL_LLM=1 on this machine.")
+    return ""
+
+
+def _llm_arg() -> tuple[match.LLMConfig, str]:
+    """The run's choice of provider, key, model and endpoint, and a complaint.
+
+    Every field blank means the server's own OpenAI setup. Unlike the email
+    check, a complaint never echoes the key back: an error message is shown on
+    screen and may be logged, and this one is a secret. Whether the key is
+    *accepted* is only known once a call is made — a rejected key falls back to
+    lexical scoring and the report says so; the Save button tests it up front.
+    """
+    default = match.LLMConfig()
+    if request.form.get("use_model", "1") == "0":
+        return default, ""
+
+    provider = (request.form.get("provider") or "openai").strip()
+    key = (request.form.get("api_key") or "").strip()
+    model = (request.form.get("model") or "").strip()
+    base_url = (request.form.get("base_url") or "").strip().rstrip("/")
+
+    spec = match.PROVIDERS.get(provider)
+    if spec is None:
+        return default, "Pick a provider from the list."
+    if key and not _API_KEY_RE.match(key):
+        return default, "That API key doesn't look right — check it was pasted whole, or clear it."
+    if model and not _MODEL_RE.match(model):
+        return default, "That model name doesn't look right — it is usually something like gpt-4o or claude-sonnet-5."
+
+    if provider == "custom":
+        if not base_url:
+            return default, "Add the endpoint URL of your OpenAI-compatible server."
+        complaint = _endpoint_complaint(base_url)
+        if complaint:
+            return default, complaint
+        if not model:
+            return default, "Add the model name your endpoint serves."
+    else:
+        base_url = ""
+        if provider != "openai" and not key:
+            return default, f"Add your {spec.label} API key, or switch the provider back to OpenAI."
+
+    return match.LLMConfig(provider=provider, api_key=key, model=model, base_url=base_url), ""
+
+
+@app.post("/api/llm/check")
+def llm_check():
+    """Make one tiny call with the settings as entered, so a bad key or model
+    name is caught when the settings are saved rather than an hour into a run."""
+    if match.llm_forced_off():
+        return jsonify({"ok": False, "error": "AI judging is turned off on this server."})
+    llm, complaint = _llm_arg()
+    if complaint:
+        return jsonify({"ok": False, "error": complaint}), 400
+    if not llm.key():
+        return jsonify({"ok": False, "error": "No API key is set, here or on the server."})
+    problem = match.check_connection(llm)
+    return jsonify({"ok": not problem, "error": problem, "label": llm.label()})
 
 
 def _run_pipeline(run_id: str, pdf_path: str, run_dir: Path, options: pipeline.Options) -> None:
@@ -301,12 +496,16 @@ def recheck(run_id: str):
     email, complaint = _email_arg()
     if complaint:
         return jsonify({"error": complaint}), 400
+    llm, complaint = _llm_arg()
+    if complaint:
+        return jsonify({"error": complaint}), 400
 
     options = pipeline.Options(
         use_model=request.form.get("use_model", "1") != "0",
         take_screenshots=request.form.get("screenshots", "1") != "0" and _SHOTS_OK,
         max_claims_per_reference=_int_arg("max_claims", 6, 1, 20),
         contact_email=email,
+        llm=llm,
     )
 
     papers = sorted(UPLOADS_DIR.glob(f"{run_id}_*"))
@@ -435,6 +634,27 @@ def paper(run_id: str):
     )
 
 
+@app.delete("/api/run/<run_id>")
+def delete_run(run_id: str):
+    """Delete a run now: its manuscript, report and evidence images.
+
+    The retention period is a ceiling, not the only way out. Someone who has
+    finished with a confidential manuscript should not have to wait for a
+    sweep to be sure it is gone.
+    """
+    if not _RUN_ID.fullmatch(run_id):
+        abort(404)
+    if not (RUNS_DIR / run_id).exists() and not any(UPLOADS_DIR.glob(f"{run_id}_*")):
+        abort(404)
+    if _running(run_id):
+        return jsonify({"error": "This run is still in progress."}), 409
+    # Serialised with re-checks and verdicts, which read and rewrite the report
+    # this is about to remove.
+    with _RECHECK_LOCK:
+        _delete_run(run_id)
+    return jsonify({"deleted": run_id})
+
+
 @app.get("/runs/<run_id>/shots/<path:filename>")
 def shot(run_id: str, filename: str):
     directory = RUNS_DIR / run_id / "shots"
@@ -464,7 +684,14 @@ if __name__ == "__main__":
             "otherwise requests get split between two servers."
         )
 
+    purged = purge_expired()
     print("CiteCheck running at http://127.0.0.1:5000")
+    print(
+        "  retention        : "
+        + (f"runs deleted {_RETENTION_HOURS:g} h after last use"
+           f"{f' ({len(purged)} removed now)' if purged else ''}"
+           if _RETENTION_HOURS else "kept until deleted — set CITECHECK_RETENTION_HOURS to expire them")
+    )
     print(f"  relevance engine : {'OpenAI' if match.openai_available() else 'lexical (set OPENAI_API_KEY for model judging)'}")
     print(f"  screenshots      : {f'enabled via {_SHOTS_DETAIL}' if _SHOTS_OK else f'unavailable ({_SHOTS_DETAIL})'}")
     print(

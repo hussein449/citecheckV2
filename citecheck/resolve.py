@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass, field, asdict
 
 import requests
@@ -140,22 +141,45 @@ class ResolvedSource:
         return asdict(self)
 
 
+# Responses that say "not now" rather than "no such work". An index that is
+# throttling us or failing has not looked the reference up, so its reply is no
+# more evidence of absence than a timeout is. Under load this is not rare:
+# ten simultaneous runs drew enough 429s from Crossref and OpenAlex to turn
+# references that resolve cleanly on their own into "not found".
+_RETRY_STATUSES = {429, 502, 503, 504}
+_RETRIES = 2
+
+
+def _unavailable(resp) -> bool:
+    return resp is not None and (resp.status_code == 429 or resp.status_code >= 500)
+
+
 def _get(url: str, **kwargs) -> requests.Response | None:
     """GET *url*, or None if the request never completed.
 
     None means transport failure. A returned response — including a 404 — means
     the index answered, which is what lets a clean miss be told apart from an
-    unreachable service.
+    unreachable service. A throttled or overloaded service is retried briefly,
+    honouring Retry-After, before its reply is accepted.
     """
-    try:
-        return requests.get(url, headers=HEADERS, timeout=TIMEOUT, **kwargs)
-    except requests.RequestException:
-        return None
+    for attempt in range(_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT, **kwargs)
+        except requests.RequestException:
+            return None
+        if resp.status_code not in _RETRY_STATUSES or attempt == _RETRIES:
+            return resp
+        try:
+            wait = float(resp.headers.get("Retry-After") or 0)
+        except ValueError:
+            wait = 0.0
+        time.sleep(min(10.0, wait or 2.0 * (attempt + 1)))
+    return resp
 
 
 def _record(src: ResolvedSource, index: str, resp, found: bool) -> None:
     """Log how one index answered for this reference."""
-    if resp is None:
+    if resp is None or _unavailable(resp):
         src.errored(index)
     elif found:
         src.hit(index)

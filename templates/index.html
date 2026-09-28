@@ -26,7 +26,8 @@
     </a>
 
     <div class="caps">
-      <span class="cap {{ 'on' if capabilities.model else 'off' }}"
+      <span class="cap {{ 'on' if capabilities.model else 'off' }}" id="capEngine"
+            data-label="{{ capabilities.engine_label }}"
             title="Whether a model key is configured. What actually judged a run is shown on its report.">
         <i></i>{{ capabilities.engine_label }}
       </span>
@@ -88,9 +89,10 @@
             <small>Higher is faster but hits publisher sites harder. 6–8 suits a large bibliography.</small>
           </label>
           <label class="check">
-            <input type="checkbox" id="useModel" {{ 'checked' if capabilities.model else 'disabled' }}>
+            <input type="checkbox" id="useModel" {{ 'checked' if capabilities.model else 'disabled' }}
+                   data-env="{{ '1' if capabilities.model else '0' }}">
             <span>Judge relevance with an AI model</span>
-            <small>{{ 'Each citing sentence is judged separately. Falls back to lexical scoring on failure.' if capabilities.model else 'Set OPENAI_API_KEY to enable.' }}</small>
+            <small id="useModelHint">{{ 'Each citing sentence is judged separately. Falls back to lexical scoring on failure.' if capabilities.model else ('Add your OpenAI API key below to enable.' if capabilities.user_key else 'Turned off on this server.') }}</small>
           </label>
           <label class="check">
             <input type="checkbox" id="useShots" {{ 'checked' if capabilities.screenshots else 'disabled' }}>
@@ -106,6 +108,48 @@
               one, those references are judged on their abstract alone. Crossref
               and OpenAlex also answer named callers faster.{{ ' Overrides the address set in the environment.' if capabilities.contact_email else '' }}</small>
           </label>
+          {% if capabilities.user_key %}
+          <label>
+            <span>AI provider</span>
+            <select id="provider">
+              {% for p in capabilities.providers %}
+              <option value="{{ p.id }}" data-key-hint="{{ p.key_hint }}"
+                      data-default-model="{{ p.default_model }}">{{ p.label }}</option>
+              {% endfor %}
+            </select>
+            <small>Any provider with an OpenAI-compatible API works — pick
+              "Other" for one not listed{{ ', or a model running on this machine' if capabilities.local_llm else '' }}.</small>
+          </label>
+          <label>
+            <span>Model</span>
+            <input type="text" id="model" autocomplete="off" spellcheck="false">
+            <small id="modelHint">Leave blank for the provider's default.</small>
+          </label>
+          <label class="wide" id="baseUrlRow" hidden>
+            <span>Endpoint URL</span>
+            <input type="url" id="baseUrl" autocomplete="off" spellcheck="false"
+                   placeholder="{{ 'http://localhost:11434/v1' if capabilities.local_llm else 'https://your-provider.example/v1' }}">
+            <small>The base URL of the OpenAI-compatible API, usually ending in /v1.</small>
+          </label>
+          <label class="wide">
+            <span id="apiKeyLabel">API key{{ ' — optional' if capabilities.model else ' — turns on AI judging' }}</span>
+            <input type="password" id="apiKey" autocomplete="off" spellcheck="false"
+                   placeholder="{{ 'using the key set on this server' if capabilities.model else 'sk-...' }}">
+            <small id="apiKeyHint">Runs are judged and billed on your own account with
+              the provider. The key is sent with each run and used only for it — it
+              is never written to the report or kept on the server.{{ " With OpenAI, leave it blank to use the server's key." if capabilities.model else '' }}</small>
+          </label>
+          <label class="check wide remember">
+            <input type="checkbox" id="rememberKey">
+            <span>Remember my key on this browser</span>
+            <small>Off, it is forgotten when this tab closes. Leave off on a shared computer.</small>
+          </label>
+          {% endif %}
+        </div>
+        <div class="settings-actions">
+          <button type="button" class="btn" id="saveSettings">Save settings</button>
+          <button type="button" class="btn ghost" id="resetSettings">Reset to defaults</button>
+          <span id="settingsStatus" class="settings-status" role="status" aria-live="polite"></span>
         </div>
       </details>
 
@@ -209,6 +253,7 @@
           <h2 id="resultTitle">Results</h2>
           <p class="status" id="resultMeta"></p>
           <p class="status" id="engineNote" hidden></p>
+          <p class="status" id="coverageNote" hidden></p>
           <p class="status print-only" id="printMeta"></p>
         </div>
         <div class="results-actions">
