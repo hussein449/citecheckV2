@@ -26,8 +26,8 @@ _NUMERIC = re.compile(r"\[\s*(\d{1,3}(?:\s*[-–—,;]\s*\d{1,3})*)\s*\]")
 # Surnames routinely carry non-ASCII letters (Eißfeldt, Osório, Muñoz), so the
 # name classes have to be Unicode-aware. An ASCII-only class stops at the first
 # such letter, which loses the marker entirely rather than merely truncating it.
-_U = r"A-ZÀ-ÖØ-Þ"
-_L = r"A-Za-zÀ-ÖØ-öø-ÿĀ-ſ"
+_U = r"A-ZÀ-ÖØ-ÞĀ-ɏ"
+_L = r"A-Za-zÀ-ÖØ-öø-ÿĀ-ɏ"
 _NAME_WORD = rf"[{_U}][{_L}'’\-]+"
 # A surname printed as two words: "Betti Sorbelli", "Rojas Viloria".
 _SURNAME = rf"{_NAME_WORD}(?:\s+{_NAME_WORD}){{0,2}}"
@@ -41,13 +41,13 @@ _AUTHORS = rf"{_SURNAME}(?:\s+et\s+al\.?|\s*(?:and|&)\s*{_SURNAME})?"
 _LEAD_IN = r"(?:(?:see|also|e\.g\.|cf\.|c\.f\.|i\.e\.|compare)[,\s]+){0,3}"
 _AUTHOR_YEAR = re.compile(
     rf"\(\s*({_LEAD_IN}{_AUTHORS}(?:\s*,\s*)?\s*(?:19|20)\d{{2}}[a-z]?"
-    rf"(?:\s*[;,]\s*[^()]{{3,80}}?(?:19|20)\d{{2}}[a-z]?|\s*,\s*(?:19|20)\d{{2}}[a-z]?)*)\s*\)"
+    rf"(?:\s*[;,]\s*[^()]{{3,80}}?(?:19|20)\d{{2}}[a-z]?|\s*[;,]\s*(?:19|20)\d{{2}}[a-z]?)*)\s*\)"
 )
 # The same markers in square brackets, which natbib's "square" option prints:
 # "[Ioffe and Szegedy, 2015]", "Kingma and Ba [2014]".
 _AUTHOR_YEAR_SQUARE = re.compile(
     rf"\[\s*({_LEAD_IN}{_AUTHORS}(?:\s*,\s*)?\s*(?:19|20)\d{{2}}[a-z]?"
-    rf"(?:\s*[;,]\s*[^\[\]]{{3,80}}?(?:19|20)\d{{2}}[a-z]?|\s*,\s*(?:19|20)\d{{2}}[a-z]?)*)\s*\]"
+    rf"(?:\s*[;,]\s*[^\[\]]{{3,80}}?(?:19|20)\d{{2}}[a-z]?|\s*[;,]\s*(?:19|20)\d{{2}}[a-z]?)*)\s*\]"
 )
 # Labels built from author initials and a two-digit year: "[BJP12]", "[KW13]",
 # "[RMW+14]". The "alpha" bibliography style; the label is the key.
@@ -256,17 +256,24 @@ def _author_year_keys(group: str) -> list[tuple[str, str]]:
         if re.search(r"(?:19|20)\d{2}", piece):
             pieces.append(held)
             held = ""
+    surname = ""
     for chunk in pieces:
         chunk = re.sub(rf"^{_LEAD_IN}", "", chunk.strip())
         # "Peters et al., 2017, 2018a" is two works by the same authors.
         years = re.findall(r"((?:19|20)\d{2}[a-z]?)(?![a-z\d])", chunk)
         name = re.match(rf"({_NAME_WORD})", chunk)
+        if years and not name and surname and re.fullmatch(r"[\d\sa-z,]+", chunk):
+            # "Radford et al., 2018; 2019": the second year is theirs too.
+            for year in dict.fromkeys(years):
+                out.append((normalise_key(surname, year), f"{surname} et al., {chunk}"))
+            continue
         if not (years and name):
             continue
         if name.group(1).lower() in _NOT_A_SURNAME:
             continue
+        surname = name.group(1)
         for year in dict.fromkeys(years):
-            out.append((normalise_key(name.group(1), year), chunk))
+            out.append((normalise_key(surname, year), chunk))
     return out
 
 

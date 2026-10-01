@@ -283,6 +283,85 @@ class InitialsFirstUnquotedTest(unittest.TestCase):
                 )
 
 
+class GivenNameFirstTest(unittest.TestCase):
+    """ "Diederik P. Kingma and Jimmy Ba. Adam: ..." with the year at the end."""
+
+    TEXT = """
+        Diederik P. Kingma and Jimmy Lei Ba. Adam: A method for stochastic optimization. In International
+        Conference on Learning Representations (ICLR), 2015.
+
+        Laurens van der Maaten and Geoffrey Hinton. Visualizing data using t-sne. Journal of Machine
+        Learning Research, 9:2579-2605, 2008.
+
+        Ashish Vaswani, Noam Shazeer, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all
+        you need. In NIPS, 2017.
+
+        Wayne W. Zachary. An information flow model for conflict and fission in small groups. Journal of
+        anthropological research, pp. 452-473, 1977.
+    """
+
+    def test_entries_are_keyed_on_the_surname(self):
+        parsed = refs.parse_references(self.TEXT)
+        self.assertEqual([r.key for r in parsed], ["kingma2015", "maaten2008", "vaswani2017", "zachary1977"])
+        self.assertEqual(parsed[0].authors, "Diederik P. Kingma and Jimmy Lei Ba")
+        self.assertTrue(parsed[0].title.startswith("Adam: A method"))
+        self.assertTrue(parsed[1].title.startswith("Visualizing data"))
+
+    def test_a_true_vancouver_entry_is_still_one(self):
+        authors, title, _ = refs._split_fields("Bosona T. Urban freight last mile logistics. Logistics. 2020;4(4):24-38")
+        self.assertEqual((authors, title), ("Bosona T", "Urban freight last mile logistics"))
+
+
+class VancouverAuthorYearTest(unittest.TestCase):
+    """J. Stat. Software: "Bates DM, Watts DG (1988). Title. Publisher."."""
+
+    TEXT = """
+        Bates DM, Watts DG (1988). Nonlinear Regression Analysis and Its Applications. Wiley, Hoboken.
+
+        Chambers JM (1993). Linear Models. In Statistical Models in S, chapter 4. Chapman and Hall.
+
+        Gelman A, Hill J (2006). Data Analysis Using Regression. Cambridge University Press.
+
+        The appendix then lists its steps, which are not references and say so at some length
+        before they begin, describing how a formula is parsed and evaluated by the modular functions
+        that the package provides, what each of them returns, and how the pieces are put together again
+        into a fitted model object, none of which has anything to do with the bibliography above.
+
+        1. Convert a gamm4 formula into an lme4 formula.
+
+        2. Parse this formula using lFormula.
+
+        3. Modify the resulting transposed random effects model matrix.
+    """
+
+    def test_numbered_steps_do_not_replace_the_references(self):
+        parsed = refs.parse_references(self.TEXT)
+        self.assertEqual([r.key for r in parsed][:3], ["bates1988", "chambers1993", "gelman2006"])
+
+
+class NumberListTest(unittest.TestCase):
+    def test_values_in_brackets_are_not_citations(self):
+        """ "[1, 2, 5, 10]" with nine references is a list of temperatures."""
+        parsed = refs.parse_references("\n".join(
+            f"[{n}] A. Author{n}, \"Title of paper number {n},\" J. Things, 201{n}." for n in range(1, 10)
+        ))
+        text = " ".join(f"Claim {n} holds [{n}]." for n in range(1, 8))
+        text += " We tried temperatures of [1, 2, 5, 10] and kept the best."
+        grouped = intext.group_by_reference(intext.extract_citations(text))
+        refs.link_citations(grouped, refs.index_references(parsed), parsed)
+        self.assertEqual(len(grouped["1"]), 1)     # the claim, not the temperature
+        self.assertEqual(len(grouped["5"]), 1)
+        self.assertIn("10", grouped)               # still reported, as out of range
+
+
+class YearListTest(unittest.TestCase):
+    def test_a_bare_second_year_belongs_to_the_authors_before_it(self):
+        text = " ".join(f"Point {i} stands (Smith, 201{i})." for i in range(5))
+        text += " Language models transfer (Radford et al., 2018; 2019)."
+        keys = {c.key for c in intext.extract_citations(text)}
+        self.assertLessEqual({"radford2018", "radford2019"}, keys)
+
+
 class WrappedYearTest(unittest.TestCase):
     def test_years_on_their_own_line_are_not_running_headers(self):
         """ "(1916)." and "(1918)." on one page are not a header seen twice."""

@@ -59,12 +59,20 @@ def parse_references(refs_text: str) -> list[Reference]:
         return []
 
     numbered = _split_numbered(refs_text)
-    if len(numbered) >= 2:
+    first = _ENTRY_MARKER.search(refs_text)
+    if len(numbered) >= 2 and not (first and len(refs_text[: first.start()].strip()) > 400):
         return _build_all(numbered)
+    # Numbers that only start well into the text are something else: an
+    # appendix listing its steps "1. ... 2. ..." after an unnumbered list. Taken
+    # for the bibliography, four steps replaced thirty-seven references. Keep
+    # them only if they are the better reading.
+    by_number = _build_all(numbered) if len(numbered) >= 2 else []
 
     labelled = _split_alpha(refs_text)
     if len(labelled) >= 2:
         return _build_all(labelled)
+
+    refs_text = _drop_trailing_blocks(refs_text)
 
     # Without entry numbers there is no unambiguous boundary marker, and each
     # way of guessing one fails on layouts the other handles: splitting on
@@ -75,7 +83,7 @@ def parse_references(refs_text: str) -> list[Reference]:
     # complete entries. Over-splitting does not win by default: a fragment with
     # no author or no year builds no reference and so does not count.
     return max(
-        (
+        [
             _build_all(_trim_last(split(refs_text)))
             # A tie goes to the first, and the year-sentence split is the one
             # that keeps a wrapped author list in one piece: blank-line blocks
@@ -84,9 +92,33 @@ def parse_references(refs_text: str) -> list[Reference]:
                 _split_year_sentence, _split_year_terminated, _split_author_year,
                 _split_blocks, _split_year_anchored,
             )
-        ),
+        ] + [by_number],
         key=len,
     )
+
+
+def _drop_trailing_blocks(refs_text: str) -> str:
+    """Cut the paragraphs after the last one that closes like a reference.
+
+    An unnumbered list has nothing to say where it ends, and the splitters
+    below flatten the text, so an appendix table that follows it becomes the
+    tail of the last entry. Before flattening, the paragraph breaks are still
+    there: a reference closes on its year, an identifier or a page range, and
+    a page of anything else after the last paragraph that does is not the list.
+    """
+    blocks = re.split(r"(\n\s*\n)", refs_text)
+    closes = re.compile(r"(?:(?:19|20)\d{2}[a-z]?\)?|\d{4,5}(?:v\d+)?|\d\s*[\-–]\s*\d+)\.?\s*$")
+    last = max((i for i in range(0, len(blocks), 2) if closes.search(blocks[i].strip())), default=None)
+    if last is None:
+        return refs_text
+    tail = "".join(blocks[last + 1:])
+    # Only when the tail carries no year at all. Entries close in many ways
+    # this pattern does not know (a DOI, a URL, an issue number), and four real
+    # references at the end of a list were once cut for ending on a volume
+    # number. Every reference has a year somewhere; an appendix table does not.
+    if len(tail.strip()) > 300 and not _YEAR.search(tail):
+        return "".join(blocks[: last + 1])
+    return refs_text
 
 
 def _build_all(chunks: list[tuple[int | None, str]]) -> list[Reference]:
@@ -477,7 +509,8 @@ def _build_reference(number: int | None, raw: str) -> Reference | None:
         # spelled-out given name followed by the surname ("Gabor Angeli"), so
         # the last word is what a marker prints. The other words stay reachable
         # as aliases, which covers the two-word surname this guesses wrong.
-        if not (_SURNAME_FIRST.match(head) or _INITIALS_FIRST.match(head)):
+        if not (_SURNAME_FIRST.match(head) or _INITIALS_FIRST.match(head)
+                or _VANCOUVER_FIRST.match(head)):
             words = words[-1:]
         # The letter is how the paper itself tells two works by the same
         # authors in the same year apart; without it both key alike and neither
@@ -502,10 +535,12 @@ def _build_reference(number: int | None, raw: str) -> Reference | None:
 # Surnames routinely carry accents (Faiçal, Muñoz-Villamizar, Osório), so the
 # name classes have to be Unicode-aware or the whole author run fails at the
 # first such author and the title is lost.
-_U = r"A-ZÀ-ÖØ-Þ"                                  # uppercase letters
+# Latin Extended-A and -B interleave their cases, so past Latin-1 the
+# "uppercase" class simply admits both: "Łukasz" has to be able to open a name.
+_U = r"A-ZÀ-ÖØ-ÞĀ-ɏ"                               # uppercase letters
 # Latin-1 + Latin Extended-A, plus the spacing modifier letters that PDF text
 # extraction leaves behind ("Přikryl" often arrives as "Pˇrikryl").
-_L = r"A-Za-zÀ-ÖØ-öø-ÿĀ-ſˀ-˿"
+_L = r"A-Za-zÀ-ÖØ-öø-ÿĀ-ɏˀ-˿"
 # Name particles that carry a lowercase first letter: "de Freitas", "van der Berg".
 _PARTICLE = (
     r"(?:(?:de|del|della|da|do|dos|das|di|du|van|von|der|den|ten|ter|la|le|"
@@ -658,6 +693,13 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
         run = pattern.match(stripped)
         if not (run and len(run.group(1)) >= 6):
             continue
+        if pattern is _VANCOUVER_RUN and "," not in run.group(1):
+            # "Diederik P. Kingma and Jimmy Ba. Adam: ..." opens exactly like a
+            # Vancouver author, "Bosona T. Urban freight ...". What follows
+            # tells them apart: more names, or a title.
+            following = re.split(r"\.\s+", stripped[run.end():].strip(), maxsplit=1)
+            if len(following) == 2 and _NAME_LIST.match(following[0]) and len(following[0].split()) <= 14:
+                continue
         authors = run.group(1).strip(" .,;&")
         rest = _LEADING_ETAL.sub("", stripped[run.end():]).strip(" .,;:")
         rest = _LEADING_YEAR.sub("", rest)
@@ -677,10 +719,13 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
 
     # Style C -- period-delimited, no recognisable author run.
     parts = [p.strip() for p in re.split(r"\.\s+", stripped) if p.strip()]
+    # The stop after a middle initial is not the end of the author list:
+    # "Diederik P. Kingma and Jimmy Ba. Adam", "Movshon, J. Anthony, and
+    # Simoncelli, Eero. Title". Cut there, the entry is keyed on a given name
+    # and no citation of it can find it.
     while (
         len(parts) >= 3
         and re.search(rf"(?:^|[\s,])[{_U}]$", parts[0])
-        and "," in parts[0]
         and _NAME_LIST.match(f"{parts[0]}. {parts[1]}")
     ):
         parts[:2] = [f"{parts[0]}. {parts[1]}"]
@@ -691,7 +736,7 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
         # given names spelled out ("Duchi, John, Hazan, Elad, and Singer,
         # Yoram"). Read as a title, that sends the search out for a paper
         # called after its own authors.
-        names_only = "," in head and _NAME_LIST.match(head)
+        names_only = ("," in head or " and " in head) and _NAME_LIST.match(head)
         if not names_only and not re.search(r"[A-Z]\.", head) and len(head.split()) > 6:
             return "", head, ". ".join(parts[1:])[:200]
         # ACM prints the year as a sentence of its own between the authors and
@@ -811,13 +856,23 @@ _YEAR_TERMINATED_HEAD = re.compile(
     rf"(?={_NOT_AN_AUTHOR}(?:[{_U}]\.\s*){{0,3}}{_NAME}(?:\s+(?:{_NAME}|[{_U}]\.?(?=[\s,]))){{0,3}}"
     rf"(?:,|\s+and\s|\.\s+[{_U}]))"
     # after any other full stop — only an unmistakable author list
-    rf"|(?<=[{_L})]\.)(?<!\b[{_U}]\.)\s+(?={_NOT_AN_AUTHOR}{_NAME}(?:\s+{_NAME})?,\s+"
+    rf"|(?<=[{_L})\d]\.)(?<!\b[{_U}]\.)\s+(?={_NOT_AN_AUTHOR}{_NAME}(?:\s+{_NAME})?,\s+"
     rf"(?:[{_U}]\.,?\s|{_NAME},\s+{_NAME},\s+{_NAME}))"
 )
 # "Duchi, John, Hazan, Elad, and Singer, Yoram": nothing but names.
 _NAME_LIST = re.compile(
     rf"^(?:{_NAME}|[{_U}]\.?|and|&|et|al\.?)"
     rf"(?:[\s,]+(?:{_NAME}|[{_U}]\.?(?:-[{_U}]\.?)?|[a-z]{{2,4}}|and|&|et|al\.?))*$"
+)
+
+
+# "Bates DM, Watts DG (1988)" -- Vancouver initials in an author-year list.
+# Without this the capitals read as a second name word and the entry is keyed
+# "dm1988".
+_VANCOUVER_FIRST = re.compile(
+    # No full stop after the capitals: "Samuel R. Bowman" is a given name and
+    # a middle initial, not a surname and its initials.
+    rf"^\s*({_NAME}(?:\s+{_NAME})??)\s+[A-Z]{{1,3}}(?=\s*[,(]|\s+and\b|\s*$)"
 )
 
 
@@ -832,7 +887,7 @@ def _entry_surname(text: str) -> str:
     bibliography parses down to only those entries that happened to spell their
     first author's given name in full.
     """
-    for pattern in (_SURNAME_FIRST, _INITIALS_FIRST, _BARE_NAME):
+    for pattern in (_SURNAME_FIRST, _INITIALS_FIRST, _VANCOUVER_FIRST, _BARE_NAME):
         match = pattern.match(text)
         if match:
             return match.group(1).strip()
@@ -901,6 +956,9 @@ def _author_total(ref: Reference) -> int:
     text = ref.authors or ref.raw[:200]
     if re.search(r"\bet\s+al\b", text):
         return 3
+    people = [p.strip() for p in text.split(",") if p.strip()]
+    if people and all(re.fullmatch(rf"{_NAME}(?:\s+{_NAME})?\s+[A-Z]{{1,3}}", p) for p in people):
+        return min(len(people), 3)      # "Bates D, Maechler M": Vancouver, no "and"
     parts = [p for p in re.split(r",?\s+and\s+|\s*&\s*", text) if p.strip()]
     if len(parts) == 1:
         return 1 if text.count(",") <= 1 else 3
@@ -961,6 +1019,35 @@ def _split_shared_key(key: str, grouped: dict[str, list], references: list[Refer
     return resolved
 
 
+def _drop_number_lists(grouped: dict[str, list], references: list[Reference]) -> None:
+    """Discard the in-range numbers of a bracket that also holds impossible ones.
+
+    "temperatures of [1, 2, 5, 10]" in a paper with nine references is a list
+    of values. The 10 is reported as out of range either way; the 1, 2 and 5
+    would be recorded as citations of the first, second and fifth references,
+    each then judged against a sentence about temperatures.
+    """
+    numbers = [r.number for r in references if r.number is not None]
+    if not numbers:
+        return
+    highest = max(numbers)
+    suspect = {
+        (cite.char_offset, cite.label)
+        for key, cites in grouped.items() if key.isdigit() and int(key) > highest
+        for cite in cites
+    }
+    if not suspect:
+        return
+    for key in list(grouped):
+        if key.isdigit() and int(key) > highest:
+            continue
+        kept = [c for c in grouped[key] if (c.char_offset, c.label) not in suspect]
+        if kept:
+            grouped[key] = kept
+        else:
+            del grouped[key]
+
+
 def link_citations(
     grouped: dict[str, list],
     ref_index: dict[str, Reference],
@@ -969,6 +1056,7 @@ def link_citations(
     """Return the references that are actually cited, plus unmatched keys."""
     matched: dict[str, Reference] = {}
     orphans: list[str] = []
+    _drop_number_lists(grouped, all_references or [])
     aliases = _alias_index(list(ref_index.values()))
     for key in list(grouped):
         ref = ref_index.get(key) or aliases.get(key)

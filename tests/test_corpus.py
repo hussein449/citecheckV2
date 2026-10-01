@@ -78,6 +78,21 @@ CORPUS = {
     "iclr_author_year": ("arxiv_1409.1556.pdf", "author-year", 34, 34, 0),
     #   "[Ioffe and Szegedy, 2015]"
     "square_bracket_author_year": ("arxiv_1607.06450.pdf", "author-year", 32, 32, 0),
+    # A third unseen batch.
+    #   "temperatures of [1, 2, 5, 10]" with nine references
+    "values_in_brackets": ("arxiv_1503.02531.pdf", "numeric", 9, 9, 1),
+    "iclr_identifier_tail": ("arxiv_1412.6806.pdf", "author-year", 26, 26, 0),
+    "cvpr_numeric": ("arxiv_1411.4038.pdf", "numeric", 39, 39, 0),
+    "inline_bibitems": ("arxiv_1301.3781.pdf", "numeric", 32, 31, 0),
+    #   "Diederik P. Kingma and Jimmy Ba. Adam": middle initials, given names first
+    "middle_initials": ("arxiv_1609.02907.pdf", "author-year", 32, 32, 0),
+    "iccv_numeric": ("arxiv_1703.06870.pdf", "numeric", 45, 45, 2),
+    "appendix_table_after_list": ("arxiv_2010.11929.pdf", "author-year", 58, 58, 0),
+    "quantum_numeric": ("arxiv_1801.00862.pdf", "numeric", 57, 57, 0),
+    #   Vancouver initials in an author-year list, steps numbered in the appendix;
+    #   still imperfect: wrapped author lists are cut at the line break
+    "jss_author_year": ("arxiv_1406.5823.pdf", "author-year", 34, 27, 5),
+    "numeric_long": ("arxiv_1802.03426.pdf", "numeric", 65, 65, 0),
     "minimal": ("test_paper.pdf", "numeric", 5, 5, 0),
 }
 
