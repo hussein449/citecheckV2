@@ -116,7 +116,7 @@ def run(pdf_path: str, run_dir: Path, options: Options, progress: Progress = _no
     progress({"stage": "references", "message": "Parsing the reference list…", "percent": 16})
     reference_list = refs.parse_references(parsed.references_text)
     ref_index = refs.index_references(reference_list)
-    matched, orphans = refs.link_citations(grouped, ref_index)
+    matched, orphans = refs.link_citations(grouped, ref_index, reference_list)
 
     # A numeric marker past the last entry in the bibliography is not a citation
     # anyone could follow: it is a summary table's row label, a dataset id or a

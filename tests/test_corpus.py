@@ -48,6 +48,20 @@ CORPUS = {
     # after the bibliography whose "Reference" column header was taken for the
     # bibliography heading.
     "superscript_numeric": ("crisprVerse_original.pdf", "numeric", 105, 100, 0),
+    # Seven papers the tool had never been run on, every one of which came back
+    # with a short or empty reference list. What each one hid:
+    #   "Surname, Given" author lists, and maths full of superscript exponents
+    "iclr_surname_given": ("arxiv_1412.6980_adam.pdf", "author-year", 23, 22, 0),
+    #   the same style, with 2013a/b/c entries and an appendix after the list
+    "iclr_year_suffixes": ("arxiv_1412.6572_adversarial.pdf", "author-year", 19, 18, 0),
+    #   "References" 40% of the way through, methods and more citations after it
+    "heading_before_halfway": ("arxiv_2006.10256_numpy.pdf", "numeric", 73, 73, 0),
+    "long_appendix_after_list": ("arxiv_1911.08265_muzero.pdf", "numeric", 49, 49, 0),
+    #   no heading at all, and the list resumes after the Methods
+    "no_heading_list_resumes": ("arxiv_1803.02342_graphene.pdf", "numeric", 65, 54, 0),
+    "no_heading_two_column": ("arxiv_1707.04344_51atom.pdf", "numeric", 62, 62, 0),
+    #   no heading, superscript citations, entries labelled "12 Surname, A."
+    "bare_number_labels": ("arxiv_1610.08057_dtc.pdf", "numeric", 34, 33, 0),
     "minimal": ("test_paper.pdf", "numeric", 5, 5, 0),
 }
 
@@ -75,7 +89,7 @@ class CorpusTest(unittest.TestCase):
         grouped = intext.group_by_reference(citations)
         reference_list = refs.parse_references(parsed.references_text)
         matched, orphans = refs.link_citations(
-            grouped, refs.index_references(reference_list)
+            grouped, refs.index_references(reference_list), reference_list
         )
         return citations, reference_list, matched, orphans
 
@@ -144,7 +158,12 @@ class PageStructureTest(unittest.TestCase):
         self.assertTrue(parsed.references_text.strip(), "no bibliography found")
         # The split point is a real heading, so the last body page precedes it.
         self.assertIsNotNone(parsed.references_page)
-        self.assertLess(len(parsed.body_text), len(parsed.full_text))
+        # The list is blanked out of the body rather than cut from it, so that
+        # offsets after it still map to their pages: same length, less text.
+        self.assertEqual(len(parsed.body_text), len(parsed.full_text))
+        self.assertLess(len(parsed.body_text.split()), len(parsed.full_text.split()))
+        first_entry = parsed.references_text.strip().splitlines()[0]
+        self.assertNotIn(first_entry, parsed.body_text)
 
 
 if __name__ == "__main__":

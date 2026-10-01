@@ -101,6 +101,10 @@ class Citation:
     # False for table rows, headings and figure legends — text where a "[12]" is
     # a row label rather than an assertion about a source.
     prose: bool = True
+    # Read from a bare "Name, 2021" table cell rather than a bracketed marker.
+    # Counted when it names an entry in the bibliography; when it names none it
+    # was not a citation, and is dropped instead of reported as unmatched.
+    tentative: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -231,7 +235,7 @@ def _author_year_keys(group: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for chunk in re.split(r"\s*;\s*", group):
         chunk = chunk.strip()
-        year = re.search(r"((?:19|20)\d{2})[a-z]?", chunk)
+        year = re.search(r"((?:19|20)\d{2}[a-z]?)(?![a-z])", chunk)
         name = re.match(rf"({_NAME_WORD})", chunk)
         if not (year and name):
             continue
@@ -251,6 +255,9 @@ def _markers_in(sentence: str) -> list[_Marker]:
 
     for match in _NUMERIC.finditer(sentence):
         keys = _expand_numeric(match.group(1))
+        # "[75,150]bp upstream" is an interval with its unit, not two citations.
+        if keys and sentence[match.end():match.end() + 1].islower():
+            continue
         if keys:
             found.append(
                 _Marker(match.start(), match.end(), "numeric",
@@ -500,8 +507,60 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
     if numeric_hits >= 5 or author_year_hits >= 5:
         winner = "numeric" if numeric_hits >= author_year_hits else "author-year"
         citations = [c for c in citations if c.style == winner]
+        if winner == "author-year":
+            citations.extend(_table_cell_citations(body_text, page_of_offset))
 
     return _dedupe(citations)
+
+
+# A summary table in an author-year paper names its studies in a column of
+# their own: "Euchi & Sadok, 2021" alone on its line, with no brackets, because
+# a table cell needs none. That is the only place some references are cited.
+_CELL_CITATION = re.compile(
+    rf"^[ \t]*({_AUTHORS})\s*,?\s+((?:19|20)\d{{2}}[a-z]?)[ \t]*$"
+)
+
+
+def _table_cell_citations(body: str, page_of_offset=None) -> list[Citation]:
+    # Line by line: the name patterns allow any whitespace between the words of
+    # a two-word surname, and across a line break that reads the cell above as
+    # part of the name.
+    cells: list[tuple[int, int, str, str, str]] = []
+    offset = 0
+    for line in body.split("\n"):
+        match = _CELL_CITATION.match(line)
+        if match:
+            cells.append((offset, offset + len(line), match.group(1), match.group(2),
+                          " ".join(line.split())))
+        offset += len(line) + 1
+
+    found: list[Citation] = []
+    for index, (start, end, authors, year, label) in enumerate(cells):
+        surname = re.split(r"\s+et\s+al|\s*(?:and|&)\s*", authors)[0]
+        if surname.split()[0].lower() in _NOT_A_SURNAME:
+            continue
+        # The row is what the table says about the study: the cells up to the
+        # next study's name.
+        stop = cells[index + 1][0] if index + 1 < len(cells) else end + 400
+        row = " ".join(body[end:min(stop, end + 400)].split())
+        text = f"{label}: {row}" if row else label
+        found.append(
+            Citation(
+                key=normalise_key(surname, year),
+                label=label,
+                style="author-year",
+                sentence=text,
+                claim=text,
+                line=text[:220],
+                page=page_of_offset(start) if page_of_offset else 1,
+                # Offsets here index the original text, not the flattened one;
+                # they are only ever used to order and de-duplicate.
+                char_offset=start,
+                prose=False,
+                tentative=True,
+            )
+        )
+    return found
 
 
 def _dedupe(citations: list[Citation]) -> list[Citation]:

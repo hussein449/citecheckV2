@@ -72,13 +72,13 @@ def parse_references(refs_text: str) -> list[Reference]:
     # no author or no year builds no reference and so does not count.
     return max(
         (
-            _build_all(split(refs_text))
+            _build_all(_trim_last(split(refs_text)))
             # A tie goes to the first, and the year-sentence split is the one
             # that keeps a wrapped author list in one piece: blank-line blocks
             # can find as many entries while keying one on its last author.
             for split in (
-                _split_year_sentence, _split_author_year, _split_blocks,
-                _split_year_anchored,
+                _split_year_sentence, _split_year_terminated, _split_author_year,
+                _split_blocks, _split_year_anchored,
             )
         ),
         key=len,
@@ -123,8 +123,46 @@ def _tidy(text: str) -> str:
     return text.strip(" .;,")
 
 
+# revtex under superscript citations labels entries with a bare number: "12
+# Cross, M. C. & Hohenberg, P. C.". Only tried when the bracketed and dotted
+# forms find nothing, since a wrapped page number looks the same.
+_BARE_MARKER = re.compile(
+    r"(?m)^\s*()()(\d{1,3})\s+"
+    r"(?=(?:[a-z]{2,3}\s+){0,2}[A-ZÀ-ÖØ-Þ][\w'’`\-]+(?:\s+[A-ZÀ-ÖØ-Þ][\w'’`\-]+)?,\s)"
+)
+
+
 def _split_numbered(refs_text: str) -> list[tuple[int | None, str]]:
-    matches = list(_ENTRY_MARKER.finditer(refs_text))
+    chunks = _split_on(_ENTRY_MARKER, refs_text)
+    if len(chunks) < 2:
+        chunks = _split_on(_BARE_MARKER, refs_text)
+    return _trim_last(chunks)
+
+
+def _trim_last(chunks: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
+    """Cut what follows the bibliography off its last entry.
+
+    Nothing marks the end of the last entry, so whatever the paper prints next
+    — author biographies, an appendix, a figure caption — is read as part of
+    it. An entry is a few lines; one that runs on for a page has swallowed
+    something. Cut it at the first paragraph break after it has said what a
+    reference says.
+    """
+    for at, (number, raw) in enumerate(chunks):
+        # The last entry has nothing after it to stop at; an earlier one only
+        # runs this long when a figure or a column of body text sits inside it.
+        if len(raw) <= (500 if at == len(chunks) - 1 else 900):
+            continue
+        for match in re.finditer(r"\n\s*\n", raw):
+            head = raw[: match.start()].strip()
+            if len(head) >= 40 and (_YEAR.search(head) or head.endswith(".")):
+                chunks[at] = (number, head)
+                break
+    return chunks
+
+
+def _split_on(marker: re.Pattern, refs_text: str) -> list[tuple[int | None, str]]:
+    matches = list(marker.finditer(refs_text))
     if len(matches) < 2:
         return []
 
@@ -347,6 +385,23 @@ def _split_year_sentence(refs_text: str) -> list[tuple[int | None, str]]:
     ]
 
 
+def _split_year_terminated(refs_text: str) -> list[tuple[int | None, str]]:
+    """Split where an entry ends on its year and the next opens "Surname, Given".
+
+    The ICLR and ICML style: "Duchi, John, Hazan, Elad, and Singer, Yoram.
+    Adaptive subgradient methods. JMLR, 12:2121-2159, 2011." Given names are
+    spelled out after the surname, so no initials mark where an entry opens,
+    and a justified column wraps the author list across blank lines. What is
+    regular is the end: the year, then a full stop.
+    """
+    flat = re.sub(r"\s*\n\s*", " ", refs_text).strip()
+    starts = [0] + [m.end() for m in _YEAR_TERMINATED_HEAD.finditer(flat)]
+    return [
+        (None, flat[start:end])
+        for start, end in zip(starts, starts[1:] + [len(flat)])
+    ]
+
+
 def _build_reference(number: int | None, raw: str) -> Reference | None:
     doi = ""
     doi_match = _DOI.search(raw)
@@ -373,9 +428,17 @@ def _build_reference(number: int | None, raw: str) -> Reference | None:
     # Identifiers are full of four-digit runs that read as years: the arXiv id
     # "2003.00648" was submitted in 2020, and "1912.03619" is not from 1912.
     year = ""
-    year_match = _YEAR.search(_URL.sub(" ", _DOI.sub(" ", _ARXIV.sub(" ", raw))))
-    if year_match:
-        year = year_match.group(1)
+    dated = _URL.sub(" ", _DOI.sub(" ", _ARXIV.sub(" ", raw)))
+    # "15(1):1929-1958, 2014" was published in 2014, not on page 1929.
+    suffix = ""
+    years = [
+        m for m in _YEAR.finditer(dated)
+        if not re.match(r"\s*[\-‐‑–—]\s*\d", dated[m.end():m.end() + 4])
+        and not re.search(r"(?:\d\s*[\-‐‑–—]|[:(]|pp?\.)\s*$", dated[max(0, m.start() - 6):m.start()])
+    ] or list(_YEAR.finditer(dated))
+    if years:
+        year = years[0].group(1)
+        suffix = years[0].group(0)[4:]
 
     authors, title, venue = _split_fields(raw)
 
@@ -394,7 +457,10 @@ def _build_reference(number: int | None, raw: str) -> Reference | None:
         # as aliases, which covers the two-word surname this guesses wrong.
         if not (_SURNAME_FIRST.match(head) or _INITIALS_FIRST.match(head)):
             words = words[-1:]
-        key = normalise_key("".join(words), year)
+        # The letter is how the paper itself tells two works by the same
+        # authors in the same year apart; without it both key alike and neither
+        # can be reached.
+        key = normalise_key("".join(words), year) + suffix
 
     return Reference(
         key=key,
@@ -573,10 +639,22 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
 
     # Style C -- period-delimited, no recognisable author run.
     parts = [p.strip() for p in re.split(r"\.\s+", stripped) if p.strip()]
+    while (
+        len(parts) >= 3
+        and re.search(rf"(?:^|[\s,])[{_U}]$", parts[0])
+        and "," in parts[0]
+        and _NAME_LIST.match(f"{parts[0]}. {parts[1]}")
+    ):
+        parts[:2] = [f"{parts[0]}. {parts[1]}"]
     if len(parts) >= 2:
         head = parts[0]
-        # A long head with no initials is far more likely to be the title.
-        if not re.search(r"[A-Z]\.", head) and len(head.split()) > 6:
+        # A long head with no initials is far more likely to be the title —
+        # unless it is nothing but names, which is an author list with the
+        # given names spelled out ("Duchi, John, Hazan, Elad, and Singer,
+        # Yoram"). Read as a title, that sends the search out for a paper
+        # called after its own authors.
+        names_only = "," in head and _NAME_LIST.match(head)
+        if not names_only and not re.search(r"[A-Z]\.", head) and len(head.split()) > 6:
             return "", head, ". ".join(parts[1:])[:200]
         # ACM prints the year as a sentence of its own between the authors and
         # the title ("Tesfaye Bosona. 2020. Urban freight…"), so the slot after
@@ -677,6 +755,22 @@ _YEAR_SENTENCE_ENTRY = re.compile(
 )
 
 
+# After an entry that closes on its year, "Surname, Given" or "Surname, I." is
+# enough to open the next. After any other full stop ("... Oral Presentation.")
+# only the initials form is trusted: "Acoustics, Speech and Signal Processing"
+# is a journal, and it follows a full stop too.
+_YEAR_TERMINATED_HEAD = re.compile(
+    rf"(?:(?<=\d{{4}}\.)|(?<=\d{{4}}[a-z]\.))\s+(?:\d{{1,3}}\s+)?"
+    rf"(?={_NAME}(?:\s+{_NAME})?,\s+(?:{_NAME}|[{_U}]\.))"
+    rf"|(?<=[{_L})]\.)(?<!\b[{_U}]\.)\s+(?={_NAME}(?:\s+{_NAME})?,\s+[{_U}]\.,?\s)"
+)
+# "Duchi, John, Hazan, Elad, and Singer, Yoram": nothing but names.
+_NAME_LIST = re.compile(
+    rf"^(?:{_NAME}|[{_U}]\.?|and|&|et|al\.?)"
+    rf"(?:[\s,]+(?:{_NAME}|[{_U}]\.?(?:-[{_U}]\.?)?|[a-z]{{2,4}}|and|&|et|al\.?))*$"
+)
+
+
 def _entry_surname(text: str) -> str:
     """The surname phrase an author-year marker would print for *text*.
 
@@ -722,8 +816,13 @@ def _author_year_aliases(ref: Reference) -> set[str]:
     # ("Betti Sorbelli, 2024" vs "Sorbelli, 2024"), and a spelled-out given name
     # ("Seyed Mahdi Shavarani") is cited by the surname buried at the end. So
     # index every word and the joined form, and let the marker pick.
-    candidates = [normalise_key(w, ref.year) for w in words]
-    candidates.append(normalise_key("".join(words), ref.year))
+    suffix = ref.key[-1] if re.search(r'\d{4}[a-z]$', ref.key) else ''
+    candidates = [normalise_key(w, ref.year) + suffix for w in words]
+    # ...and without the letter, for the paper that prints "2013a" in its list
+    # and plain "2013" in its text. Two entries answering to that drop out as
+    # ambiguous, like any other shared alias.
+    candidates += [normalise_key(w, ref.year) for w in words]
+    candidates.append(normalise_key("".join(words), ref.year) + suffix)
     # A word of pure punctuation normalises away to a bare year; that is not a
     # name and would match any entry published that year.
     return {key for key in candidates if key != ref.year}
@@ -747,18 +846,44 @@ def _alias_index(references: list[Reference]) -> dict[str, Reference]:
     return {alias: found[0] for alias, found in candidates.items() if len(found) == 1}
 
 
+def _sole_author(ref: Reference) -> bool:
+    return not re.search(r"\band\b|&|\bet\s+al\b", ref.authors or ref.raw[:160])
+
+
+def _by_author_count(key: str, citations: list, references: list[Reference]) -> Reference | None:
+    """Tell two entries with one key apart by how the marker names its authors.
+
+    "(Graves, 2013)" and "(Graves et al., 2013)" key alike, and an index that
+    drops shared keys leaves both unreachable. The marker has not lost the
+    distinction: one names a sole author and the other does not.
+    """
+    candidates = [r for r in references if r.key == key]
+    if len(candidates) < 2:
+        return None
+    labels = " ".join(getattr(c, "label", "") for c in citations)
+    wants_sole = not re.search(r"\bet\s+al\b|\band\b|&", labels)
+    fitting = [r for r in candidates if _sole_author(r) == wants_sole]
+    return fitting[0] if len(fitting) == 1 else None
+
+
 def link_citations(
     grouped: dict[str, list],
     ref_index: dict[str, Reference],
+    all_references: list[Reference] | None = None,
 ) -> tuple[dict[str, Reference], list[str]]:
     """Return the references that are actually cited, plus unmatched keys."""
     matched: dict[str, Reference] = {}
     orphans: list[str] = []
     aliases = _alias_index(list(ref_index.values()))
     for key in grouped:
-        ref = ref_index.get(key) or aliases.get(key)
+        ref = ref_index.get(key) or aliases.get(key) or _by_author_count(
+            key, grouped[key], all_references or []
+        )
+        if ref is None and re.search(r"\d{4}[a-z]$", key):
+            # The text says "2019a", the list just "2019".
+            ref = ref_index.get(key[:-1]) or aliases.get(key[:-1])
         if ref:
             matched[key] = ref
-        else:
+        elif not all(getattr(c, "tentative", False) for c in grouped[key]):
             orphans.append(key)
     return matched, orphans

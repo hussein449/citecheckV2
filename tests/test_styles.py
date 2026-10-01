@@ -177,7 +177,9 @@ class InTextMarkerTest(unittest.TestCase):
         )
         self.assertEqual(
             self.keys(text),
-            sorted(["bosona2020", "sorbelli2024", "li2022",
+            # The letter stays: it is how "Li et al., 2022a" and "2022b" are
+            # told apart, and a list printing no letter is still reached.
+            sorted(["bosona2020", "sorbelli2024", "li2022a",
                     "eissfeldt2022", "shavarani2018", "rojas2021"]),
         )
 
@@ -230,7 +232,7 @@ class LinkingTest(unittest.TestCase):
     def link(self, bibliography, markers):
         reference_list = refs.parse_references(bibliography)
         grouped = intext.group_by_reference(intext.extract_citations(markers))
-        return refs.link_citations(grouped, refs.index_references(reference_list))
+        return refs.link_citations(grouped, refs.index_references(reference_list), reference_list)
 
     def test_author_year_marker_finds_numbered_entry(self):
         """Word's numbered-list styling numbers a bibliography cited by name."""

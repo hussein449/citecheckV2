@@ -30,9 +30,14 @@ _REF_HEADING = re.compile(
 _POST_REF_HEADING = re.compile(
     r"^\s*(?:\d+\s*\.?\s*)?(appendix|appendices|supplementary|supporting\s+information|"
     r"author\s+contributions?|acknowledge?ments?|about\s+the\s+authors?|"
-    r"biograph(?:y|ies)|funding|conflicts?\s+of\s+interest)\b",
+    r"biograph(?:y|ies)|funding|conflicts?\s+of\s+interest|"
+    r"methods?(?:\s+summary)?\s*$|extended\s+data|data\s+availability|code\s+availability|"
+    r"author\s+information|competing\s+interests?)",
     re.IGNORECASE,
 )
+# ICLR and NeurIPS head an appendix "A  RUBBISH CLASS EXAMPLES": one letter, then
+# capitals. A reference entry is never a line of capitals.
+_CAPITALS_APPENDIX = re.compile(r"^\s*[A-Z]\s+[A-Z][A-Z0-9 \-:,&]{5,70}$")
 
 # ACL, NeurIPS and most LaTeX templates letter their appendices and never print
 # the word: the section after the bibliography is headed "A  Annotation
@@ -320,8 +325,8 @@ def parse_pdf(path: str) -> ParsedPDF:
         if marked and sum(
             len(_INLINE_BRACKET.findall(a)) - len(_INLINE_BRACKET.findall(b))
             for a, b in zip(marked, raw_pages)
-        ) > sum(len(_INLINE_BRACKET.findall(b)) for b in raw_pages):
-            raw_pages = marked
+        ) <= sum(len(_INLINE_BRACKET.findall(b)) for b in raw_pages):
+            marked = None
         meta = {
             "title": (doc.metadata or {}).get("title") or "",
             "author": (doc.metadata or {}).get("author") or "",
@@ -330,6 +335,29 @@ def parse_pdf(path: str) -> ParsedPDF:
     finally:
         doc.close()
 
+    plain = _assemble(raw_pages)
+    if marked:
+        # And only when the bibliography is numbered. A superscript can cite
+        # entry 12; it cannot cite "Duchi et al., 2011", so in an author-year
+        # paper every raised number is an exponent or a footnote.
+        from .refs import parse_references
+
+        cited = _assemble(marked)
+        if any(r.number is not None for r in parse_references(cited[2])):
+            plain = cited
+    pages, body, refs, ref_page = plain
+    return ParsedPDF(
+        path=path,
+        pages=pages,
+        body_text=body,
+        references_text=refs,
+        references_page=ref_page,
+        meta=meta,
+    )
+
+
+def _assemble(raw_pages: list[str]) -> tuple[list[Page], str, str, int | None]:
+    """Clean the page texts and split them into body and bibliography."""
     # Identify repeated headers/footers so they don't pollute sentences.
     line_counts: dict[str, int] = {}
     for text in raw_pages:
@@ -348,14 +376,7 @@ def parse_pdf(path: str) -> ParsedPDF:
         pages.append(Page(number=idx, text=cleaned))
 
     body, refs, ref_page = _split_references(pages)
-    return ParsedPDF(
-        path=path,
-        pages=pages,
-        body_text=body,
-        references_text=refs,
-        references_page=ref_page,
-        meta=meta,
-    )
+    return pages, body, refs, ref_page
 
 
 def _split_references(pages: list[Page]) -> tuple[str, str, int | None]:
@@ -370,59 +391,92 @@ def _split_references(pages: list[Page]) -> tuple[str, str, int | None]:
     if not lines:
         return joined, "", None
 
-    # "The latter part" is measured in lines and in characters, and either will
-    # do. Pages of tables and figures after the bibliography are nearly all
-    # short lines, which can push a heading two thirds of the way through the
-    # text down to a third of the way through the line count.
-    earliest = int(len(lines) * 0.45)
-    earliest_char = len(joined) * 0.45
-    candidates: list[int] = []
-    offset = len(joined)
-    for idx in range(len(lines) - 1, -1, -1):
-        offset -= len(lines[idx]) + 1
-        if idx < earliest and offset < earliest_char:
-            break
-        if _REF_HEADING.match(lines[idx]):
-            candidates.append(idx)
+    from .refs import parse_references
 
-    # A table column headed "Reference" is the same line as the heading, and
-    # tables usually sit after the bibliography, so the last match is not
-    # always the right one. Take the last that is followed by actual entries.
-    heading_idx: int | None = candidates[0] if candidates else None
-    if len(candidates) > 1:
-        from .refs import parse_references
+    # Where the heading sits says little. A paper with long methods, appendices
+    # or supplementary material after its bibliography has "References" less
+    # than half way through, and a table column headed "Reference" is the same
+    # line as the heading. What tells them apart is what follows: take the
+    # heading with the most parseable entries under it, the later one on a tie.
+    earliest = int(len(lines) * 0.1)
+    candidates = [i for i in range(len(lines) - 1, earliest - 1, -1) if _REF_HEADING.match(lines[i])]
+    heading_idx: int | None = None
+    best = 0
+    for idx in candidates:
+        found = len(parse_references(_reference_tail(lines, idx)))
+        if found > best:
+            heading_idx, best = idx, found
+    if best < 3:
+        # Nothing convincing under any heading: keep the old reading, the last
+        # heading in the latter part of the document, if there is one.
+        late = [i for i in candidates if i >= len(lines) * 0.45]
+        heading_idx = late[0] if late else None
 
-        for idx in candidates:
-            if len(parse_references(_reference_tail(lines, idx))) >= 3:
-                heading_idx = idx
-                break
-
-    if heading_idx is None:
-        # Fall back: a run of lines that look like numbered bibliography entries.
-        heading_idx = _guess_reference_start(lines, earliest)
+    if heading_idx is None or best < 3:
+        # Physics templates print no heading at all: the list simply starts.
+        guessed = _guess_reference_start(lines, earliest)
+        if guessed is not None:
+            heading_idx = guessed - 1
 
     if heading_idx is None:
         return joined, "", None
 
-    body = "\n".join(lines[:heading_idx])
-    refs = _reference_tail(lines, heading_idx)
+    # The list as one or more stretches of lines. Nature-format papers number
+    # one list across two: 1-50 after the main text, 51-62 after the Methods.
+    first_end = _reference_end(lines, heading_idx)
+    stretches = [(heading_idx + 1, first_end)]
+    refs = "\n".join(lines[heading_idx + 1 : first_end])
+    while True:
+        numbers = [r.number for r in parse_references(refs) if r.number is not None]
+        resume = _continuation(lines, stretches[-1][1], max(numbers) + 1) if numbers else None
+        if resume is None:
+            break
+        end = _reference_end(lines, resume - 1)
+        stretches.append((resume, end))
+        refs += "\n" + "\n".join(lines[resume:end])
+
+    # Everything that is not the list is body, including what follows it: the
+    # methods, appendices and tables of a paper cite references too, and read
+    # as "never cited" if the text stops at the bibliography. The list itself
+    # is blanked rather than cut, so every offset still maps to its page.
+    listed = {heading_idx} | {i for start, end in stretches for i in range(start, end)}
+    body = "\n".join(" " * len(line) if i in listed else line for i, line in enumerate(lines))
 
     consumed = len("\n".join(lines[:heading_idx]))
     ref_page = _page_for_line_offset(pages, consumed)
     return body, refs, ref_page
 
 
+def _reference_end(lines: list[str], heading_idx: int) -> int:
+    """Index of the first line after the list that starts below ``heading_idx``."""
+    start = heading_idx + 1
+    for idx in range(start + 6, len(lines)):
+        if (
+            _POST_REF_HEADING.match(lines[idx])
+            or _CAPITALS_APPENDIX.match(lines[idx])
+            or _opens_lettered_appendix(lines[start:], idx - start)
+        ):
+            return idx
+    return len(lines)
+
+
 def _reference_tail(lines: list[str], heading_idx: int) -> str:
     """The bibliography text under the heading at ``lines[heading_idx]``."""
-    tail = lines[heading_idx + 1 :]
+    return "\n".join(lines[heading_idx + 1 : _reference_end(lines, heading_idx)])
 
-    # Stop at an appendix / acknowledgements heading if one follows.
-    end = len(tail)
-    for idx, line in enumerate(tail):
-        if idx > 5 and (_POST_REF_HEADING.match(line) or _opens_lettered_appendix(tail, idx)):
-            end = idx
-            break
-    return "\n".join(tail[:end])
+
+def _continuation(lines: list[str], after: int, number: int) -> int | None:
+    """Where a numbered list picks up again at *number*, if it does."""
+    for marker in _LIST_MARKERS:
+        found = [(i, int(m.group(1))) for i in range(after, len(lines))
+                 if (m := marker.match(lines[i]))]
+        for pos, (idx, n) in enumerate(found):
+            if n != number:
+                continue
+            # One matching number is a coincidence; the next one after it is a list.
+            if any(m == number + 1 and j - idx <= 60 for j, m in found[pos + 1:pos + 8]):
+                return idx
+    return None
 
 
 def _opens_lettered_appendix(lines: list[str], idx: int) -> bool:
@@ -440,24 +494,47 @@ def _opens_lettered_appendix(lines: list[str], idx: int) -> bool:
     following = [l for l in lines[idx + 1 :] if l.strip()]
     if line.strip() == "A" and not (following and re.match(r"\s*[A-Z]", following[0])):
         return False
+    # "A" alone, then a line of capitals: the ICLR appendix heading split over
+    # two lines. No reference entry reads like that.
+    if line.strip() == "A" and re.fullmatch(r"\s*[A-Z][A-Z0-9 \-:,&]{5,70}", following[0]):
+        return True
     return any(_APPENDIX_NEXT.match(l) for l in following)
 
 
+# The ways a numbered entry can open its line: "[12] ...", "(12) ...", "12. ..."
+# and the bare "12 Surname, A." that revtex prints under superscript citations.
+_LIST_MARKERS = (
+    re.compile(r"^\s*\[(\d{1,3})\]\s*\S"),
+    re.compile(r"^\s*\((\d{1,3})\)\s+\S"),
+    re.compile(r"^\s*(\d{1,3})[.)]\s+\S"),
+    re.compile(r"^\s*(\d{1,3})\s+(?:[a-z]{2,3}\s+){0,2}[A-Z][\w'’`\-]+(?:\s+[A-Z][\w'’`\-]+)?,\s"),
+)
+
+
 def _guess_reference_start(lines: list[str], earliest: int) -> int | None:
-    """Detect an unlabelled bibliography by its dense run of "[n]" entries."""
-    marker = re.compile(r"^\s*(?:\[\d{1,3}\]|\(\d{1,3}\)|\d{1,3}[.)])\s+\S")
-    best: int | None = None
-    run = 0
-    for idx in range(earliest, len(lines)):
-        if marker.match(lines[idx]):
-            run += 1
-            if run >= 4 and best is None:
-                best = idx - run + 1
-        elif lines[idx].strip():
-            if run and best is not None and run < 4:
-                best = None
-            run = 0
-    return best
+    """Find an unlabelled bibliography: the line where its entry 1 starts.
+
+    Entries run over several lines, so the list is not a block of consecutive
+    marker lines. It is a count: 1, then 2 a few lines later, then 3, in one
+    marker style. Body text has numbered lists too ("1. Load the atoms"), so
+    the longest such count wins, and it has to reach at least five.
+    """
+    best_start, best_run = None, 4
+    for marker in _LIST_MARKERS:
+        found = [(i, int(m.group(1))) for i in range(earliest, len(lines))
+                 if (m := marker.match(lines[i]))]
+        for pos, (start, number) in enumerate(found):
+            if number != 1:
+                continue
+            run, at = 1, start
+            for idx, n in found[pos + 1:]:
+                if idx - at > 60:
+                    break
+                if n == run + 1:
+                    run, at = run + 1, idx
+            if run > best_run or (run == best_run and best_start is not None and start > best_start):
+                best_start, best_run = start, run
+    return best_start
 
 
 def _page_for_line_offset(pages: list[Page], char_offset: int) -> int:
