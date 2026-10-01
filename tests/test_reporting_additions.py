@@ -206,3 +206,85 @@ class ThrottledIndexTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetadataMismatchTest(unittest.TestCase):
+    """An entry whose authors or year disagree with the published record."""
+
+    def flags(self, raw, records, existence="confirmed"):
+        from citecheck import crosscheck, refs, resolve
+
+        (reference,) = refs.parse_references("[1] " + raw + "\n[2] A. Other, \"Padding entry title here,\" J., 2001.")[:1]
+        source = resolve.ResolvedSource(existence=existence, records=records)
+        return {f.kind: f.message for f in crosscheck.metadata_flags(source, reference)}
+
+    RAW = ('B. Zheng and R. Zhang, "Intelligent reflecting surface-enhanced OFDM," '
+           "IEEE Wireless Commun. Lett., vol. 9, no. 4, pp. 518-522, Apr. 2020.")
+    RECORD = {"index": "Crossref", "title": "Intelligent reflecting surface-enhanced OFDM",
+              "title_agreement": 1.0, "year": "2020", "surnames": ["Zheng", "Zhang"]}
+
+    def test_matching_entry_raises_nothing(self):
+        self.assertEqual(self.flags(self.RAW, [self.RECORD]), {})
+
+    def test_wrong_surname_is_reported(self):
+        flags = self.flags(self.RAW.replace("B. Zheng", "B. Zhang"), [self.RECORD])
+        self.assertIn("author-name-mismatch", flags)
+        self.assertIn("Zheng", flags["author-name-mismatch"])
+
+    def test_wrong_year_is_reported(self):
+        flags = self.flags(self.RAW.replace("2020", "2016"), [self.RECORD])
+        self.assertEqual(list(flags), ["year-mismatch"])
+        self.assertIn("2016", flags["year-mismatch"])
+
+    def test_one_year_apart_is_a_preprint_not_an_error(self):
+        self.assertEqual(self.flags(self.RAW.replace("2020", "2019"), [self.RECORD]), {})
+
+    def test_transliterated_and_accented_names_match(self):
+        raw = 'T. Rocktaschel and J. Mueller, "End-to-end differentiable proving at scale," NeurIPS, 2017.'
+        record = dict(self.RECORD, title="End-to-end differentiable proving at scale",
+                      year="2017", surnames=["Rocktäschel", "Müller"])
+        self.assertEqual(self.flags(raw, [record]), {})
+
+    def test_et_al_entry_is_only_held_to_its_first_author(self):
+        raw = 'B. Zheng et al., "Intelligent reflecting surface-enhanced OFDM," IEEE WCL, 2020.'
+        record = dict(self.RECORD, surnames=["Zheng", "Zhang", "You", "Wu"])
+        self.assertEqual(self.flags(raw, [record]), {})
+
+    def test_record_for_another_work_is_not_compared(self):
+        record = dict(self.RECORD, title_agreement=0.3, year="2001", surnames=["Nobody"])
+        self.assertEqual(self.flags(self.RAW, [record]), {})
+
+    def test_unconfirmed_reference_is_not_compared(self):
+        record = dict(self.RECORD, year="2001")
+        self.assertEqual(self.flags(self.RAW, [record], existence="unconfirmed"), {})
+
+    def test_two_years_apart_is_still_a_preprint(self):
+        self.assertEqual(self.flags(self.RAW.replace("2020", "2018"), [self.RECORD]), {})
+
+    def test_preprint_entry_is_not_dated_by_the_journal_version(self):
+        raw = ('J. Chen and W. Yu, "Channel estimation for reconfigurable intelligent surface '
+               'aided multi-user MIMO systems," arXiv preprint arXiv:1912.03619, 2019.')
+        record = dict(self.RECORD, index="OpenAlex", year="2023", surnames=["Chen", "Yu"])
+        self.assertEqual(self.flags(raw, [record]), {})
+
+    def test_arxiv_id_is_not_read_as_the_year(self):
+        from citecheck import refs
+
+        reference = refs.parse_references(
+            '[1] B. Zheng and R. Zhang, "Intelligent reflecting surface assisted OFDMA," '
+            "arXiv preprint arXiv:2003.00648, 2020.\n"
+            '[2] A. Other, "Padding entry title here," J., 2001.'
+        )[0]
+        self.assertEqual(reference.year, "2020")
+
+    def test_book_editions_are_not_year_errors(self):
+        raw = "S. M. Kay, Fundamentals of statistical signal processing. Prentice Hall PTR, 1993."
+        record = dict(self.RECORD, year="2006", surnames=["Kay"], book=True)
+        self.assertEqual(self.flags(raw, [record]), {})
+
+    def test_other_work_under_the_same_title_is_one_finding(self):
+        raw = "S. M. Kay, Fundamentals of digital image processing. Journal of Imaging, 1993."
+        record = dict(self.RECORD, index="OpenAlex", year="2009", surnames=["Dougherty"])
+        flags = self.flags(raw, [record])
+        self.assertEqual(list(flags), ["record-mismatch"])
+        self.assertIn("Dougherty", flags["record-mismatch"])

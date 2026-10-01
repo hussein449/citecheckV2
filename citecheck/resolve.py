@@ -120,6 +120,12 @@ class ResolvedSource:
     retracted: bool = False
     integrity: list[dict] = field(default_factory=list)
 
+    # What each index holds for the work, kept apart from the fields above:
+    # those fall back to the printed entry when an index is silent, so they
+    # cannot be compared against it. One dict per index that returned a record:
+    # {"index", "title", "title_agreement", "year", "surnames"}.
+    records: list[dict] = field(default_factory=list)
+
     notes: list[str] = field(default_factory=list)
 
     def hit(self, index: str) -> None:
@@ -406,6 +412,11 @@ def _enrich_arxiv(src: ResolvedSource, arxiv_id: str) -> None:
         src.title = re.sub(r"\s+", " ", title.group(1)).strip()
     if summary:
         src.abstract = re.sub(r"\s+", " ", summary.group(1)).strip()
+    published = re.search(r"<published>\s*(\d{4})", text)
+    _note_record(
+        src, "arXiv", src.title, published.group(1) if published else "",
+        [_surname(n) for n in re.findall(r"<author>\s*<name>(.*?)</name>", text, re.S)],
+    )
     doi = re.search(r"<arxiv:doi[^>]*>(.*?)</arxiv:doi>", text, re.S)
     if doi and not src.doi:
         src.doi = doi.group(1).strip()
@@ -413,6 +424,30 @@ def _enrich_arxiv(src: ResolvedSource, arxiv_id: str) -> None:
     # A withdrawn id still returns a feed entry, just an empty one, so presence
     # of the query alone proves nothing — the title is what confirms the paper.
     _record(src, "arXiv", resp, found=bool(src.title))
+
+
+def _surname(full_name: str) -> str:
+    """The family name out of "Given Family", for indices that do not split it."""
+    words = (full_name or "").split()
+    return words[-1] if words else ""
+
+
+def _note_record(
+    src: ResolvedSource, index: str, title: str, year, surnames, kind: str = ""
+) -> None:
+    """Keep what *index* says about the work, for comparison with the entry."""
+    year = str(year or "").strip()
+    surnames = [s.strip() for s in surnames if s and s.strip()][:40]
+    if not title or not (surnames or year):
+        return
+    src.records.append({
+        "index": index,
+        "title": title[:300],
+        "title_agreement": round(_title_agreement(src.claimed_title, title), 3),
+        "year": year if re.fullmatch(r"(?:19|20)\d{2}", year) else "",
+        "surnames": surnames,
+        "book": "book" in (kind or "").lower() or "monograph" in (kind or "").lower(),
+    })
 
 
 def _enrich_crossref_by_doi(src: ResolvedSource, doi: str, email: str = "") -> None:
@@ -437,13 +472,19 @@ def _lookup_crossref(src: ResolvedSource, ref: Reference, email: str = "") -> No
     query = (ref.title or ref.raw)[:350]
     if len(query) < 12:
         return
+    # A title on its own is a poor query when its words are common in the field:
+    # "Reconfigurable intelligent surfaces for energy efficiency in wireless
+    # communication" returns five other papers built from the same vocabulary
+    # and not the one cited. The authors and year are what single it out.
+    if ref.title:
+        query = " ".join(filter(None, [query, (ref.authors or "")[:150], ref.year]))
     resp = _get(
         "https://api.crossref.org/works",
         params=_polite({
             "query.bibliographic": query,
             "rows": 5,
             "select": "DOI,title,author,issued,container-title,abstract,URL,score,"
-                      "update-to,updated-by",
+                      "update-to,updated-by,type",
         }, email),
     )
     if not resp or resp.status_code != 200:
@@ -539,6 +580,12 @@ def _apply_crossref_item(src: ResolvedSource, item: dict) -> None:
     src.year = src.year or _year_from_parts((item.get("issued") or {}).get("date-parts"))
     _apply_crossref_integrity(src, item)
     authors = item.get("author") or []
+    _note_record(
+        src, "Crossref", " ".join(item.get("title") or []),
+        _year_from_parts((item.get("issued") or {}).get("date-parts")),
+        [a.get("family") or "" for a in authors],
+        item.get("type") or "",
+    )
     if authors and not src.authors:
         names = [
             " ".join(filter(None, [a.get("given"), a.get("family")]))
@@ -634,6 +681,12 @@ def _enrich_openalex(src: ResolvedSource, ref: Reference, email: str = "") -> No
                 "source": "openalex",
             })
 
+    _note_record(
+        src, "OpenAlex", item.get("title") or "", item.get("publication_year"),
+        [_surname((a.get("author") or {}).get("display_name") or "")
+         for a in item.get("authorships") or []],
+        item.get("type") or "",
+    )
     src.title = src.title or (item.get("title") or "")
     src.doi = src.doi or (item.get("doi") or "").replace("https://doi.org/", "")
     if not src.year and item.get("publication_year"):
@@ -693,6 +746,10 @@ def _enrich_semantic_scholar(src: ResolvedSource) -> None:
     if not item:
         return
 
+    _note_record(
+        src, "Semantic Scholar", item.get("title") or "", item.get("year"),
+        [_surname(a.get("name") or "") for a in item.get("authors") or []],
+    )
     if not src.abstract and item.get("abstract"):
         src.abstract = item["abstract"].strip()
     oa = (item.get("openAccessPdf") or {}).get("url")

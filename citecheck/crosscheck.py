@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, asdict
+from difflib import SequenceMatcher
 
 # "Pinto et al. [29]" — unambiguous attribution to a person.
 _CREDIT_ETAL = re.compile(
@@ -67,10 +68,15 @@ def surnames_of(authors: str) -> set[str]:
     Handles both conventions — "Kim, G.-H." and "G.-H. Kim" — by simply taking
     every token that is not an initial.
     """
-    names: set[str] = set()
+    return set(_name_words(authors))
+
+
+def _name_words(authors: str) -> list[str]:
+    """Every name word in an author string, folded, in order, initials dropped."""
+    names: list[str] = []
     for token in re.split(r"[,;&]|\band\b", authors or ""):
         for word in token.split():
-            letters = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ]", "", word)
+            letters = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿĀ-ſ]", "", word)
             if len(letters) < 2:
                 continue
             # Initials carry dots and almost no letters: "G.", "G.-H.", "J.M.".
@@ -79,7 +85,7 @@ def surnames_of(authors: str) -> set[str]:
                 continue
             if _fold(letters) in {"et", "al", "jr", "sr", "eds", "ed", "the"}:
                 continue
-            names.add(_fold(letters))
+            names.append(_fold(letters))
     return names
 
 
@@ -151,7 +157,168 @@ def check(key: str, reference, citations, duplicate_of: str = "") -> list[Flag]:
     return flags
 
 
-def source_flags(source) -> list[Flag]:
+# How sure the title match has to be before an index record is taken to be the
+# cited work, and so worth comparing an entry's authors and year against. Title
+# search returns near-misses built from the same vocabulary, and a record for
+# some other paper disagrees on everything.
+_SAME_WORK = 0.85
+# Spellings this close are one name transliterated two ways ("Müller" and
+# "Mueller"), not two people. "Zheng"/"Zhang" and "Langmead"/"Longmead" fall
+# well below it.
+_SAME_NAME = 0.9
+
+_LETTERS = r"[^A-Za-zÀ-ÖØ-öø-ÿĀ-ſ]"
+
+
+def _alike(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _display(name: str) -> str:
+    """Crossref stores some family names in capitals: "DAGAN"."""
+    return name.title() if name.isupper() else name
+
+
+def _printed_authors(reference) -> str:
+    """The author part of the entry as printed, not as parsed.
+
+    The parsed author field can stop short — at a middle initial, at "et al." —
+    and an author it dropped would be reported as missing from the entry.
+    Everything before the title is the safer text to search.
+    """
+    raw = reference.raw or ""
+    at = raw.find(reference.title[:40]) if len(reference.title or "") >= 12 else -1
+    return raw[:at] if at > 0 else (reference.authors or "")
+
+
+def _year_gap(reference, records) -> dict | None:
+    """The record whose year the entry contradicts, if every record does."""
+    printed = reference.year or ""
+    if not printed or printed in (reference.title or ""):
+        # A year inside the title is part of the title, not the date.
+        return None
+    # Books are reissued for decades and each index dates a different edition.
+    dated = [r for r in records if r.get("year") and not r.get("book")]
+    # An entry that cites the preprint is dated by the preprint server. The
+    # other indices give the year of the journal version, often years later.
+    if re.search(r"arxiv|preprint|biorxiv|medrxiv", reference.raw or "", re.I):
+        dated = [r for r in dated if r.get("index") == "arXiv"]
+    # A year or two apart is the gap between a preprint and its publication, or
+    # between online-first and print. It is not an error in the entry, and
+    # neither is a year that any one index agrees with.
+    if not dated or any(abs(int(r["year"]) - int(printed)) < 3 for r in dated):
+        return None
+    return dated[0]
+
+
+def _missing_author(reference, records) -> tuple[dict, str, str] | None:
+    """(record, the author it lists, what the entry prints instead or "")."""
+    printed_text = _printed_authors(reference)
+    printed = _name_words(printed_text)
+    if not printed:
+        return None
+    truncated = bool(re.search(r"\bet\s+al\b|\band\s+others\b", reference.raw or "", re.I))
+
+    def is_printed(surname: str) -> bool:
+        words = _name_words(surname)
+        return any(
+            _alike(candidate, name) >= _SAME_NAME
+            for candidate in words + ["".join(words)]
+            for name in printed
+        )
+
+    for record in records:
+        surnames = [s for s in record.get("surnames") or [] if _name_words(s)]
+        if not surnames:
+            continue
+        # The first author is always printed. The rest are only checked when
+        # the entry lists everyone, which "et al." or a short list rules out.
+        expected = surnames[:1]
+        if not truncated and len(printed) >= len(surnames) <= 12:
+            expected = surnames
+        missing = [s for s in expected if not is_printed(s)]
+        if not missing:
+            return None
+        wanted = _name_words(missing[0])[-1]
+        # The misspelling is a name the record does not account for, about as
+        # long as the one it replaced: "Dragon" for "Dagan", not the "Dan" of a
+        # co-author's given name.
+        spare = [
+            name for name in printed
+            if not any(_alike(name, w) >= _SAME_NAME for s in surnames for w in _name_words(s))
+        ]
+        closest = max(
+            spare,
+            key=lambda name: _alike(wanted, name) - 0.1 * (abs(len(name) - len(wanted)) > 1),
+            default="",
+        )
+        shown = ""
+        if closest and _alike(wanted, closest) >= 0.6:
+            shown = next(
+                (w.strip(".,;") for w in printed_text.split()
+                 if _fold(re.sub(_LETTERS, "", w)) == closest),
+                closest,
+            )
+        return record, _display(missing[0]), shown
+    return None
+
+
+def metadata_flags(source, reference) -> list[Flag]:
+    """Where the entry's authors or year disagree with the published record."""
+    if source is None or reference is None:
+        return []
+    if getattr(source, "existence", "") != "confirmed":
+        return []
+    records = [
+        r for r in getattr(source, "records", None) or []
+        if r.get("title_agreement", 0) >= _SAME_WORK
+    ]
+    author = _missing_author(reference, records)
+    dated = _year_gap(reference, records)
+
+    # Wrong first author *and* wrong year under a matching title is not two
+    # slips in one entry. It is a different work that shares the title, which
+    # is what a mistyped or invented title looks like from here.
+    if author and dated and not author[2]:
+        record, name, _ = author
+        return [Flag(
+            kind="record-mismatch",
+            severity="medium",
+            message=(
+                f"The published work with this title is by {name} "
+                f"({dated['year']}, per {record['index']}), which matches neither the "
+                f"authors nor the year ({reference.year}) printed in the entry. The "
+                "entry may have the wrong title, or mix up two works."
+            ),
+        )]
+
+    flags: list[Flag] = []
+    if author:
+        record, name, shown = author
+        flags.append(Flag(
+            kind="author-name-mismatch",
+            severity="medium",
+            message=(
+                f"{record['index']} lists “{name}” as an author of this work, "
+                + (f"but the entry prints “{shown}”. " if shown
+                   else "who does not appear in the entry. ")
+                + "Check the author names against the published record."
+            ),
+        ))
+    if dated:
+        flags.append(Flag(
+            kind="year-mismatch",
+            severity="medium",
+            message=(
+                f"The entry gives the year as {reference.year}, but {dated['index']} "
+                f"records this work as published in {dated['year']}. Check the year, "
+                "or that the entry cites the edition it means to."
+            ),
+        ))
+    return flags
+
+
+def source_flags(source, reference=None) -> list[Flag]:
     """Flags that come from what the indices said about the cited work.
 
     Separate from `check` because these need the network stage to have run,
@@ -160,6 +327,7 @@ def source_flags(source) -> list[Flag]:
     flags: list[Flag] = []
     if source is None:
         return flags
+    flags.extend(metadata_flags(source, reference))
 
     if getattr(source, "retracted", False):
         where = ", ".join(sorted({i.get("source", "") for i in source.integrity if i.get("source")}))

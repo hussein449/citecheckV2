@@ -114,6 +114,21 @@ It also runs two checks that need no network access:
   Kim et al., the numbering has slipped. Flagged as high severity.
 - **Duplicate entries.** The same work listed twice under different numbers.
 
+And two that compare each entry with the published record the indexes hold for
+it, once the title match is strong enough to be sure it is the same work:
+
+- **Author name mismatch.** The record lists "Langmead" and the entry prints
+  "Longmead". The first author is always checked; the rest only when the entry
+  lists everyone rather than "et al.".
+- **Year mismatch.** The entry's year is three or more years from the record's.
+  Smaller gaps are the normal distance between a preprint and its publication.
+  Books are skipped, since every index dates a different edition.
+
+Both are medium severity: they are errors in the bibliography, not evidence the
+citation misrepresents its source. When the author *and* the year both disagree
+under a matching title, that is reported once, as a different work sharing the
+title — which is what a mistyped or invented title looks like.
+
 The report opens with a screening judgement — `critical`, `concern`, `review` or
 `clear` — built from findings you can check, not from a weighted score. An
 opaque number out of 100 invites arguments nobody can settle.
@@ -490,7 +505,7 @@ knowing per reference:
 | `source.retracted`, `source.integrity[]` | Retraction and correction notices. |
 | `source.claimed_title`, `source.best_agreement` | What the entry printed, and how well anything matched it. |
 | `claim_tally` | How many of this reference's citations came to each verdict. |
-| `flags[]` | `author-mismatch`, `duplicate-entry`, `retracted-source`, `reference-not-found`, each with a severity. |
+| `flags[]` | `author-mismatch`, `duplicate-entry`, `retracted-source`, `reference-not-found`, `author-name-mismatch`, `year-mismatch`, `record-mismatch`, each with a severity. |
 | `citing_shot`, `citing_page` | The capture of the citing sentence inside your own paper, and the page it is on. |
 | `rechecked` | When this reference — or one citation of it — was last re-checked, against what, and what that displaced. |
 | `reviewed`, `machine` | A verdict set by hand, and what the tool concluded before it. `machine` disappears again when the hand-set verdict is cleared, so undo is lossless. |

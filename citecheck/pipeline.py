@@ -916,7 +916,7 @@ def _check_one(
 
     entry["source"] = source.to_dict()
     entry["notes"].extend(source.notes)
-    entry["flags"].extend(f.to_dict() for f in crosscheck.source_flags(source))
+    entry["flags"].extend(f.to_dict() for f in crosscheck.source_flags(source, reference))
 
     # A reference no index has heard of is a finding in itself, and a far more
     # serious one than "we couldn't read the source". Say so plainly instead of

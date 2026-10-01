@@ -370,8 +370,10 @@ def _build_reference(number: int | None, raw: str) -> Reference | None:
         if not doi and "doi.org/" in url.lower():
             doi = url.lower().split("doi.org/", 1)[1]
 
+    # Identifiers are full of four-digit runs that read as years: the arXiv id
+    # "2003.00648" was submitted in 2020, and "1912.03619" is not from 1912.
     year = ""
-    year_match = _YEAR.search(raw)
+    year_match = _YEAR.search(_URL.sub(" ", _DOI.sub(" ", _ARXIV.sub(" ", raw))))
     if year_match:
         year = year_match.group(1)
 
