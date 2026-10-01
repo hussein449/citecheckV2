@@ -80,6 +80,29 @@ _CONFIRM_AGREEMENT = 0.55
 # reserved for references nothing anywhere came close to.
 _FABRICATION_CEILING = 0.35
 
+# Below this, a title match is not "borderline" and author or year agreement
+# cannot rescue it. Set at the confirmation bar itself: a surname as common as
+# Hu or Ali plus a matching year turned "ST-LoRA: ..." into the LoRA paper, so
+# what confirms a work is its title, and the rest only ranks candidates that
+# already pass.
+_LIFTABLE_AGREEMENT = 0.55
+
+# Kinds of document no scholarly index lists. Their absence from Crossref says
+# nothing about whether they exist, so it must never be reported as a finding.
+_UNINDEXED_KIND = re.compile(
+    r"\b(ISO(/IEC)?\s*\d|IEC\s*\d|IEEE\s+Std|ITU-T|RFC\s*\d|NIST\s+(SP|Special)|"
+    r"standard|technical\s+report|tech\.\s*rep|white\s*paper|manual|documentation|"
+    r"press\s+release|\[online\]|"
+    # Books and chapters: a publisher's imprint where a journal would be.
+    r"university\s+press|academic\s+press|\bpress,|publishers?\b|verlag|"
+    r"thesis|dissertation)",
+    re.IGNORECASE,
+)
+
+# How strong a title-search match has to be before it may displace something
+# the entry printed: a web address, or a DOI that turned out to be dead.
+_SAME_WORK_AGREEMENT = 0.85
+
 
 @dataclass
 class ResolvedSource:
@@ -108,6 +131,13 @@ class ResolvedSource:
     indices_errored: list[str] = field(default_factory=list)
     identifier_printed: str = ""      # "doi" | "arxiv" | "url" | ""
     identifier_resolved: bool | None = None
+    # The DOI as printed, when it turned out not to be registered but the work
+    # itself was found under another one. `doi` then holds the real one.
+    identifier_wrong: str = ""
+    # The title of the other work a printed identifier turned out to belong to.
+    identifier_points_to: str = ""
+    # A standard, report, manual or web document: not something an index lists.
+    unindexed_kind: bool = False
     existence: str = "unconfirmed"    # "confirmed" | "unconfirmed" | "not_found"
     # How well the title of whatever a search returned agrees with the title the
     # citing paper printed. Only meaningful when no identifier was printed.
@@ -208,7 +238,12 @@ def _agreement(
     evidence on its own but decisive alongside a middling title score, so both
     are allowed to lift a borderline match over the line.
     """
-    score = _title_agreement(src.claimed_title, cand_title)
+    title_score = _title_agreement(src.claimed_title, cand_title)
+    score = title_score
+    # "Borderline" has a floor. A shared surname and a shared year are common
+    # enough that, added to a title sharing only its subject vocabulary, they
+    # confirmed a different paper from the same sub-field as the one cited.
+    liftable = title_score >= _LIFTABLE_AGREEMENT
 
     if ref is not None and cand_authors:
         from .crosscheck import surnames_of
@@ -216,14 +251,22 @@ def _agreement(
         printed = surnames_of(ref.authors or ref.raw[:120])
         found = surnames_of(cand_authors)
         if printed and found and (printed & found):
-            score += 0.12
+            score += 0.12 if liftable else 0.0
+        elif printed and found and title_score < 0.95:
+            # Same vocabulary, nobody in common: "LoRA: Low-rank adaptation of
+            # large language models" against "ST-LoRA: SVD-guided sparse
+            # low-rank adaptation ...". Title overlap alone confirmed that as
+            # the cited paper.
+            score -= 0.3
 
-    if ref is not None and ref.year and cand_year and ref.year == cand_year:
+    if liftable and ref is not None and ref.year and cand_year and ref.year == cand_year:
         score += 0.08
 
-    best = min(1.0, score)
-    src.best_agreement = max(src.best_agreement, round(best, 3))
-    return best
+    # The fabrication call weighs how close *anything* came, so it keeps the
+    # unpenalised figure: a near-miss by other authors is still evidence that
+    # the entry describes real work, just not evidence of which.
+    src.best_agreement = max(src.best_agreement, round(min(1.0, max(title_score, score)), 3))
+    return max(0.0, min(1.0, score))
 
 
 def _doi_is_anchored(src: ResolvedSource) -> bool:
@@ -282,8 +325,13 @@ def resolve(ref: Reference, contact_email: str = "") -> ResolvedSource:
     # Crossref: fills metadata for a known DOI, or finds the DOI from the string.
     if src.doi:
         _enrich_crossref_by_doi(src, src.doi, email)
+        if ref.doi and "Crossref" in src.indices_missed:
+            _recover_from_dead_doi(src, ref, email)
     elif not src.url or src.resolver == "explicit-url":
         _lookup_crossref(src, ref, email)
+    if src.identifier_printed in ("doi", "arxiv") and not src.identifier_wrong:
+        _check_identifier_is_this_work(src, ref, email)
+    src.unindexed_kind = bool(_UNINDEXED_KIND.search(ref.raw or ""))
 
     # OpenAlex and Semantic Scholar each add an abstract and, crucially, an
     # open-access mirror. The abstract is the one thing that is nearly always
@@ -319,6 +367,151 @@ def resolve(ref: Reference, contact_email: str = "") -> ResolvedSource:
     return src
 
 
+def _doi_registered(doi: str) -> bool | None:
+    """Whether the DOI system itself knows *doi*. None when it did not answer.
+
+    Crossref is one registration agency among several: a DataCite DOI (Zenodo,
+    arXiv, most datasets) is perfectly real and Crossref has never heard of it.
+    The handle system is the registry of record for all of them.
+    """
+    resp = _get(f"https://doi.org/api/handles/{requests.utils.quote(doi)}")
+    if resp is None or _unavailable(resp):
+        return None
+    try:
+        code = resp.json().get("responseCode")
+    except ValueError:
+        return None
+    if code == 1:
+        return True
+    if code == 100:
+        return False
+    return None
+
+
+def _recover_from_dead_doi(src: ResolvedSource, ref: Reference, email: str = "") -> None:
+    """A printed DOI Crossref does not hold: wrong, or merely not Crossref's?
+
+    A mistyped DOI on a real paper is far more common than an invented paper,
+    and the two need opposite reports. So before the entry is called
+    unfindable, ask the DOI system whether the identifier exists at all, and if
+    it does not, look the work up by its title. Found that way, the reference
+    is real and what is wrong is its DOI.
+    """
+    registered = _doi_registered(ref.doi)
+    if registered:
+        # Real, just registered elsewhere. That is existence confirmed.
+        src.indices_missed.remove("Crossref")
+        src.hit("DOI registry")
+        return
+    if registered is None or len(ref.title or "") < 12:
+        return
+
+    found = _find_by_title(src, ref, email)
+    if found is None:
+        return
+    _adopt(src, found, ref.doi)
+    src.indices_missed.remove("Crossref")
+    src.hit("Crossref")
+    src.notes.append(
+        f"The DOI printed in this entry ({ref.doi}) is not registered, but the "
+        f"work itself was found by its title as {found.doi}. The entry's DOI is "
+        "wrong; everything below is about the work it was found under."
+    )
+
+
+def _find_by_title(src: ResolvedSource, ref: Reference, email: str) -> ResolvedSource | None:
+    """The cited work as a title search finds it, if it finds it convincingly."""
+    found = ResolvedSource(claimed_title=src.claimed_title)
+    _lookup_crossref(found, ref, email)
+    if not found.doi or found.search_agreement < _SAME_WORK_AGREEMENT:
+        return None
+    return found
+
+
+def _adopt(src: ResolvedSource, found: ResolvedSource, printed: str) -> None:
+    """Replace what a wrong identifier led to with the work the title led to."""
+    src.identifier_wrong = printed
+    src.doi = found.doi
+    src.arxiv_id = ""
+    src.url = f"https://doi.org/{found.doi}"
+    src.oa_url = ""
+    src.resolver = "crossref-search"
+    src.confidence = found.confidence
+    src.search_agreement = found.search_agreement
+    src.best_agreement = max(src.best_agreement, found.best_agreement)
+    for name in ("title", "authors", "year", "venue", "abstract", "retracted"):
+        setattr(src, name, getattr(found, name))
+    src.integrity = found.integrity
+    src.records = found.records
+
+
+def _check_identifier_is_this_work(src: ResolvedSource, ref: Reference, email: str = "") -> None:
+    """A printed identifier that resolves, but to some other work.
+
+    A DOI copied from the neighbouring entry, or generated to look right, is
+    registered and resolves cleanly, so every index "confirms" it. What it
+    confirms is a different paper, and the claim is then judged against that
+    paper's abstract. The title the entry printed is the only thing that says
+    which work was meant.
+    """
+    printed = ref.doi or ref.arxiv
+    if not src.title or len(ref.title or "") < 12:
+        return
+    if _title_agreement(src.claimed_title, src.title) >= 0.3:
+        return
+    # A title field the parser cut badly would disagree with everything. If the
+    # record's title is in the entry as printed, the entry is fine.
+    words = re.findall(r"[a-z0-9]{3,}", src.title.lower())
+    raw = (ref.raw or "").lower()
+    if words and sum(w in raw for w in words) / len(words) >= 0.6:
+        return
+
+    other = src.title
+    src.identifier_points_to = other
+    found = _find_by_title(src, ref, email)
+    if found is not None and found.doi.lower() != (ref.doi or "").lower():
+        _adopt(src, found, printed)
+        src.notes.append(
+            f"The identifier printed in this entry ({printed}) belongs to a different "
+            f"work, “{other[:90]}”. The work the entry names was found by its "
+            f"title as {found.doi}; everything below is about that work."
+        )
+    else:
+        src.identifier_wrong = printed
+        src.notes.append(
+            f"The identifier printed in this entry ({printed}) belongs to a different "
+            f"work, “{other[:90]}”. The work the entry names could not be found "
+            "under another identifier, so what follows is about the work the "
+            "identifier leads to and may not be the one cited."
+        )
+
+
+def mark_web_source(src: ResolvedSource, loaded: bool, dead: str = "") -> None:
+    """Settle existence for a reference that is a web page, from loading it.
+
+    A product page or a documentation site is in no bibliographic index, so the
+    indices' silence says nothing about it. What can be tested is the address
+    the entry printed: it loads, it is gone, or it could not be reached.
+    """
+    if src.identifier_printed != "url" or src.existence != "unconfirmed":
+        return
+    if loaded:
+        src.existence = "confirmed"
+        src.identifier_resolved = True
+        src.notes.append(
+            "This reference is a web page: the printed address loads. Web pages "
+            "are not listed in bibliographic indexes, so that is the existence "
+            "check that applies."
+        )
+    elif dead:
+        src.existence = "not_found"
+        src.identifier_resolved = False
+        src.notes.append(
+            f"The web address printed for this reference does not load ({dead}), "
+            "and no bibliographic index has a record of it."
+        )
+
+
 def _settle_existence(src: ResolvedSource) -> None:
     """Decide whether this reference is a real, findable work.
 
@@ -330,7 +523,12 @@ def _settle_existence(src: ResolvedSource) -> None:
     if src.indices_hit:
         src.existence = "confirmed"
         if src.identifier_printed in ("doi", "arxiv"):
-            src.identifier_resolved = True
+            src.identifier_resolved = not src.identifier_wrong
+        return
+
+    if src.identifier_printed == "url":
+        # A web page. No index lists those, so their silence is not evidence;
+        # the pipeline settles this by loading the address (`mark_web_source`).
         return
 
     if src.identifier_printed in ("doi", "arxiv"):
@@ -352,7 +550,13 @@ def _settle_existence(src: ResolvedSource) -> None:
             )
         return
 
-    if src.indices_missed and src.best_agreement < _FABRICATION_CEILING:
+    if src.indices_missed and src.unindexed_kind:
+        src.notes.append(
+            "This entry is a book, thesis, standard, report or web document. "
+            "The bibliographic indexes list few of those, so their having no "
+            "record of it says nothing either way. Check it against its publisher."
+        )
+    elif src.indices_missed and src.best_agreement < _FABRICATION_CEILING:
         src.existence = "not_found"
         src.notes.append(
             f"No record of this reference was found in {_and_list(src.indices_missed)}, "
@@ -520,6 +724,17 @@ def _lookup_crossref(src: ResolvedSource, ref: Reference, email: str = "") -> No
     src.search_agreement = round(score, 3)
     _record(src, "Crossref", resp, found=score >= _CONFIRM_AGREEMENT)
 
+    if score < _CONFIRM_AGREEMENT:
+        # Not the cited work on any reasonable reading. Adopting it anyway is
+        # how a company's product page came to be "checked" against a book
+        # chapter about something else, with that chapter shown as the evidence.
+        src.notes.append(
+            f"The closest record a title search found was “{title[:70]}” "
+            f"(agreement {score:.2f}). That is too weak to be the cited work, so "
+            "it was not used."
+        )
+        return
+
     # No identifier was printed, so this is a search hit, not a lookup. Say so
     # every time — a plausible-but-wrong paper is the failure mode here, and it
     # is invisible unless the report admits how the source was found.
@@ -537,7 +752,7 @@ def _lookup_crossref(src: ResolvedSource, ref: Reference, email: str = "") -> No
     _apply_crossref_item(src, best)
     src.resolver = "crossref-search"
     src.confidence = round(min(0.9, 0.2 + score * 0.75), 2)
-    if src.doi:
+    if src.doi and not (src.identifier_printed == "url" and score < _SAME_WORK_AGREEMENT):
         src.url = f"https://doi.org/{src.doi}"
 
 
@@ -660,7 +875,7 @@ def _enrich_openalex(src: ResolvedSource, ref: Reference, email: str = "") -> No
             if score > agreement:
                 item, agreement = row, score
         confirmed = bool(item) and agreement >= _CONFIRM_AGREEMENT
-        if item and agreement < 0.45:
+        if item and agreement < _CONFIRM_AGREEMENT:
             _record(src, "OpenAlex", resp, found=False)
             return
 
@@ -738,7 +953,7 @@ def _enrich_semantic_scholar(src: ResolvedSource) -> None:
             if score > agreement:
                 item, agreement = row, score
         confirmed = bool(item) and agreement >= _CONFIRM_AGREEMENT
-        if item and agreement < 0.45:
+        if item and agreement < _CONFIRM_AGREEMENT:
             _record(src, "Semantic Scholar", resp, found=False)
             return
 

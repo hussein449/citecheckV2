@@ -20,7 +20,7 @@ let recheckInFlight = false;
 
 /* Ordered by how much each verdict demands a look, worst first — the same
    ordering the report itself uses, so tiles, filters and cards all agree. */
-const VERDICTS = ["not_found", "unrelated", "weak", "unverified", "related", "supported"];
+const VERDICTS = ["not_found", "unrelated", "weak", "blocked", "unverified", "related", "supported"];
 
 const VERDICT_LABEL = {
   supported: "Supported",
@@ -28,6 +28,7 @@ const VERDICT_LABEL = {
   weak: "Weak link",
   unrelated: "Unrelated",
   unverified: "Unverified",
+  blocked: "Blocked",
   not_found: "Not found",
 };
 
@@ -688,7 +689,7 @@ function verdictsIn(entry) {
 }
 
 /* Most concerning first, so the findings that matter are never below the fold. */
-const CONCERN = { not_found: 6, unrelated: 5, weak: 4, unverified: 3, related: 2, supported: 1 };
+const CONCERN = { not_found: 6, unrelated: 5, weak: 4, blocked: 3, unverified: 3, related: 2, supported: 1 };
 
 /* The verdict alone is not the whole story. A retracted source can still be
    "related" to the claim it was cited for — that says nothing about whether it
@@ -1444,6 +1445,7 @@ function colorFor(verdict) {
     unrelated: "#dc2626",
     not_found: "#b91c1c",
     unverified: "#94a3b8",
+    blocked: "#7c3aed",
   }[verdict] || "#94a3b8";
 }
 

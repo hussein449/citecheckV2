@@ -15,3 +15,6 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Validation papers and the planted-error key: published PDFs, kept locally.
+user validation data/

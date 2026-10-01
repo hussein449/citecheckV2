@@ -34,7 +34,9 @@ _STOPWORDS = {
     "study", "studies", "paper", "work", "approach", "method", "methods", "data",
 }
 
-VERDICTS = ("supported", "related", "weak", "unrelated", "unverified", "not_found")
+VERDICTS = (
+    "supported", "related", "weak", "unrelated", "unverified", "blocked", "not_found",
+)
 
 # How much each verdict demands a human look at it. Rolling several per-claim
 # verdicts up to one headline takes the most concerning, not the average: a
@@ -45,6 +47,9 @@ _CONCERN = {
     "not_found": 5,
     "weak": 4,
     "unverified": 3,
+    # Unread, like unverified, but for a reason the reader can fix in a minute
+    # by opening the link themselves. Same concern, and never more than it.
+    "blocked": 3,
     "related": 2,
     "supported": 1,
 }

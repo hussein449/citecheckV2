@@ -502,6 +502,14 @@ _LEADING_YEAR = re.compile(r"^\(?\s*(?:19|20)\d{2}[a-z]?\s*\)?\s*[.,:;]?\s*")
 _YEAR_ONLY = re.compile(r"^\(?\s*(?:19|20)\d{2}[a-z]?\s*\)?[.,;]?$")
 
 
+_ORGANISATION = re.compile(
+    r"\b(organi[sz]ation|association|institute|institution|committee|consortium|"
+    r"society|agency|council|commission|department|ministry|foundation|"
+    r"corporation|federation|bureau|authority|union)\b",
+    re.IGNORECASE,
+)
+
+
 def _split_fields(raw: str) -> tuple[str, str, str]:
     """Best-effort author / title / venue split across common styles."""
     stripped = _URL.sub("", raw)
@@ -552,6 +560,16 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
         if len(rest) >= 8:
             title, venue = _first_sentence(rest)
             return authors, title, venue
+
+    # Style O -- "Organisation, Title of the document, Report type, 2023."
+    # Standards and reports are authored by a body and printed with no quotes
+    # and no full stops. Nothing above matches, and the comma rule below then
+    # takes the body's own name for the title: every ISO standard in a list
+    # becomes "International Organization for Standardization", resolves to the
+    # same encyclopedia entry, and is reported as a duplicate of the others.
+    commas = [p.strip() for p in stripped.split(",")]
+    if len(commas) >= 3 and _ORGANISATION.search(commas[0]) and len(commas[1]) >= 12:
+        return commas[0], commas[1], ", ".join(commas[2:])[:200]
 
     # Style C -- period-delimited, no recognisable author run.
     parts = [p.strip() for p in re.split(r"\.\s+", stripped) if p.strip()]

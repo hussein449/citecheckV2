@@ -30,6 +30,7 @@
   --mid: #9a5810;     --mid-bg: #fbf1de;
   --bad: #a92b2b;     --bad-bg: #fbeaea;
   --neutral: #5a6779; --neutral-bg: #eef1f5;
+  --blocked: #6d3fc4; --blocked-bg: #f1ebfb;
 
   --radius: 10px;
   --radius-lg: 14px;
@@ -331,6 +332,7 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 .tile.weak      .n { color: var(--mid); }
 .tile.unrelated .n, .tile.not_found .n { color: var(--bad); }
 .tile.unverified .n { color: var(--neutral); }
+.tile.blocked .n { color: var(--blocked); }
 
 .warnings {
   margin: 18px 0 0; padding: 13px 16px; border-radius: var(--radius);
@@ -381,6 +383,7 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 .badge.unrelated,
 .badge.not_found { background: var(--bad-bg); color: var(--bad); }
 .badge.unverified{ background: var(--neutral-bg); color: var(--neutral); }
+.badge.blocked   { background: var(--blocked-bg); color: var(--blocked); }
 
 .card-title { flex: 1; min-width: 0; }
 .card-title h3 { margin: 0 0 2px; font-size: 14px; font-weight: 600; line-height: 1.45; }
@@ -427,6 +430,7 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 .claim.weak      { border-left-color: var(--mid); }
 .claim.unrelated { border-left-color: var(--bad); }
 .claim.unverified{ border-left-color: var(--line-strong); }
+.claim.blocked   { border-left-color: var(--blocked); }
 .claim-top { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; flex-wrap: wrap; }
 .claim-top .where { font-size: 11.5px; color: var(--ink-dim); }
 .claim-top .where a { color: var(--accent); text-decoration: none; }
@@ -513,6 +517,7 @@ h2 { margin: 0 0 8px; font-size: 18px; font-weight: 620; }
 .pip.weak      { color: var(--mid); border-color: color-mix(in srgb, var(--mid) 35%, var(--line)); }
 .pip.unrelated, .pip.not_found { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
 .pip.unverified { color: var(--neutral); }
+.pip.blocked { color: var(--blocked); }
 /* The pip for the section currently being filtered, so the card says why it is
    in front of the reader. */
 .pip.lit { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }

@@ -949,12 +949,40 @@ def _check_one(
     entry["fetched"] = content.to_dict()
     entry["notes"].extend(content.notes)
 
+    # A web page is in no index; whether it exists is whether its address loads.
+    if source.identifier_printed == "url" and source.existence == "unconfirmed":
+        before = len(source.notes)
+        resolve.mark_web_source(
+            source,
+            loaded=content.ok and content.kind != "abstract" and not content.blocked,
+            dead=content.dead,
+        )
+        entry["source"] = source.to_dict()
+        entry["notes"].extend(source.notes[before:])
+        if source.existence == "not_found":
+            entry["flags"].extend(f.to_dict() for f in crosscheck.source_flags(source))
+            entry["verdict"] = "not_found"
+            entry["reason"] = source.notes[-1]
+            snap(source=source)
+            return entry
+
     body = content.text or source.abstract
     if not (body or "").strip():
-        entry["reason"] = (
-            "Nothing readable was retrieved from the cited source, so the claim "
-            "could not be checked against it."
-        )
+        if content.blocked:
+            # Unread, but not for want of a source: the site turned a program
+            # away. That is a different thing to tell a reader than "nothing
+            # was there", because they can open the link and we could not.
+            entry["verdict"] = "blocked"
+            entry["reason"] = (
+                "The source was located, but its site refused automated access, "
+                "so the claim could not be checked against it. Open the link "
+                "yourself, or supply the file, to have it checked."
+            )
+        else:
+            entry["reason"] = (
+                "Nothing readable was retrieved from the cited source, so the claim "
+                "could not be checked against it."
+            )
         # Still worth a header shot — it shows where the link actually landed.
         snap(content=content, source=source)
         return entry
@@ -1653,6 +1681,11 @@ def _retrieve_text(reference: refs.Reference, options: Options) -> tuple[str, st
 
     body = content.text or source.abstract
     if not (body or "").strip():
+        if content.blocked:
+            return "", "", "", (
+                "The source's site refused automated access, so there was nothing "
+                "to check this citation against."
+            )
         return "", "", "", "Nothing readable was retrieved from the cited source."
     return body, content.title or source.title, source.abstract, ""
 

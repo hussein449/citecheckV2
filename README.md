@@ -191,7 +191,17 @@ when that call was made.
 | `weak` | Only loosely connected. |
 | `unrelated` | The source is about something else. |
 | `unverified` | Not enough retrievable text to judge either way. |
-| `not_found` | No bibliographic index has any record of this reference. |
+| `blocked` | The source was located, but its site refused automated access (a bot check, HTTP 403/429) and no abstract was available, so nothing could be read. Open the link yourself or supply the file. |
+| `not_found` | No bibliographic index has any record of this reference, or the web address it prints does not load. |
+
+A site that blocks the tool does not always produce `blocked`: when an index
+holds the abstract, the claim is judged against that and the block is recorded
+in the notes. Three related findings are reported as flags rather than
+verdicts: a printed DOI that is not registered while the work exists under
+another one, a printed DOI or arXiv id that belongs to a different work, and
+(for web references) existence is settled by loading the printed address,
+since no index lists web pages. Books, theses, standards and reports that no
+index holds are left `unconfirmed`, never `not_found`.
 
 `unrelated` is a serious accusation, so **only the model tier may return it**.
 Word overlap can show that two texts *do* discuss the same thing, but low

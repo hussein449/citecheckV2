@@ -352,8 +352,39 @@ def source_flags(source, reference=None) -> list[Flag]:
     # this report answers only the latter. Retractions stay: a retracted work
     # cannot support any claim, whatever the citing sentence says.
 
+    wrong = getattr(source, "identifier_wrong", "")
+    other = getattr(source, "identifier_points_to", "")
+    if wrong and other:
+        found = wrong.lower() != (getattr(source, "doi", "") or "").lower()
+        flags.append(Flag(
+            kind="identifier-mismatch",
+            severity="high",
+            message=(
+                f"The identifier printed for this reference ({wrong}) belongs to a "
+                f"different work: “{other[:110]}”. "
+                + (f"The work the entry names exists as {source.doi}. Correct the "
+                   "identifier in the entry." if found else
+                   "Check which of the two the entry means to cite.")
+            ),
+        ))
+    elif wrong:
+        flags.append(Flag(
+            kind="identifier-mismatch",
+            severity="high",
+            message=(
+                f"The DOI printed for this reference ({wrong}) is not registered. "
+                f"The work itself exists, as {source.doi}. Correct the DOI in the entry."
+            ),
+        ))
+
     existence = getattr(source, "existence", "")
     if existence == "not_found":
+        if getattr(source, "identifier_printed", "") == "url":
+            flags.append(Flag(kind="reference-not-found", severity="high", message=(
+                "The web address printed for this reference does not load, and no "
+                "bibliographic index has a record of it. Check the address."
+            )))
+            return flags
         if getattr(source, "identifier_printed", "") in ("doi", "arxiv"):
             message = (
                 f"The {source.identifier_printed.upper()} printed for this reference is "

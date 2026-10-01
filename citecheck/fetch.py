@@ -26,6 +26,21 @@ _PAYWALL_HINTS = (
     "checking your browser", "verify you are human", "captcha",
 )
 
+# What a site says when it has decided the visitor is a program. Distinct from
+# a paywall: a paywall shows a person the abstract and a price, this shows
+# nobody anything.
+_BOT_HINTS = (
+    "checking your browser", "verify you are human", "verifying you are human",
+    "are you a robot", "captcha", "just a moment", "unusual traffic",
+    "automated access", "access denied", "request blocked", "enable javascript and cookies",
+    "pardon our interruption", "bot detection", "security check",
+    "not a bot", "proof-of-work", "anubis",
+)
+# 401/403/429 refuse the request outright. 202 and 503 are what challenge pages
+# are served under (IEEE Xplore answers a script with an empty 202).
+_REFUSED = {401, 403, 429, 451}
+_CHALLENGE = {202, 503}
+
 _STRIP_TAGS = ("script", "style", "nav", "footer", "header", "aside", "form",
                "noscript", "svg", "button")
 
@@ -40,6 +55,11 @@ class FetchedContent:
     status: int = 0
     ok: bool = False
     paywalled: bool = False
+    # The site refused automated access: nothing was read, and not because
+    # there was nothing there.
+    blocked: bool = False
+    # Why the address cannot be loaded at all ("HTTP 404", "no such host").
+    dead: str = ""
     has_abstract: bool = False
     pdf_bytes: bytes | None = None
     notes: list[str] = field(default_factory=list)
@@ -60,15 +80,24 @@ def fetch_source(src: ResolvedSource) -> FetchedContent:
             candidates.append(url)
 
     best: FetchedContent | None = None
+    blocked: list[FetchedContent] = []
     for url in candidates:
         got = _fetch_one(url)
-        if got.ok and len(got.text) > 600 and not got.paywalled:
+        if got.ok and len(got.text) > 600 and not got.paywalled and not got.blocked:
             got.notes.extend(_note_if_short(got))
             return _with_abstract(got, src)
+        if got.blocked:
+            blocked.append(got)
         if best is None or len(got.text) > len(best.text):
             best = got
 
-    return _with_abstract(best or FetchedContent(url=src.url or ""), src)
+    result = best or FetchedContent(url=src.url or "")
+    if blocked and not result.blocked:
+        # Some other address answered, but with nothing usable. The refusal is
+        # still why this source went unread.
+        result.blocked = True
+        result.notes.extend(blocked[0].notes)
+    return _with_abstract(result, src)
 
 
 def _with_abstract(result: FetchedContent, src: ResolvedSource) -> FetchedContent:
@@ -122,6 +151,8 @@ def _fetch_one(url: str) -> FetchedContent:
         )
     except requests.RequestException as exc:
         out.notes.append(f"Request failed: {type(exc).__name__}")
+        if any(hint in str(exc) for hint in ("NameResolutionError", "getaddrinfo", "Name or service not known")):
+            out.dead = "no such host"
         return out
 
     out.status = resp.status_code
@@ -136,8 +167,23 @@ def _fetch_one(url: str) -> FetchedContent:
     finally:
         resp.close()
 
+    challenged = (
+        resp.status_code in _REFUSED
+        or bool(resp.headers.get("cf-mitigated"))
+        or (resp.status_code in _CHALLENGE and _looks_like_challenge(body))
+    )
+    if challenged:
+        out.blocked = True
+        out.notes.append(
+            f"The site refused automated access (HTTP {resp.status_code} from "
+            f"{_host(resp.url)}). It may open normally in a browser."
+        )
+        return out
+
     if resp.status_code >= 400:
         out.notes.append(f"HTTP {resp.status_code} from {resp.url}")
+        if resp.status_code in (404, 410):
+            out.dead = f"HTTP {resp.status_code}"
         return out
 
     if "pdf" in ctype or body[:5] == b"%PDF-":
@@ -163,10 +209,28 @@ def _fetch_one(url: str) -> FetchedContent:
     out.title, out.text = _html_text(body, resp.encoding)
     lowered = out.text[:4000].lower()
     out.paywalled = any(h in lowered for h in _PAYWALL_HINTS) and len(out.text) < 6000
+    if len(out.text) < 2500 and any(h in lowered for h in _BOT_HINTS):
+        out.blocked = True
+        # The challenge page is not the source. Left in, it gets judged as one.
+        out.text = ""
+        out.notes.append(
+            f"The site answered with a bot check instead of the page ({_host(resp.url)}). "
+            "It may open normally in a browser."
+        )
+        return out
     if out.paywalled:
         out.notes.append("Landing page looks paywalled or bot-gated.")
     out.ok = bool(out.text.strip())
     return out
+
+
+def _host(url: str) -> str:
+    return re.sub(r"^https?://([^/]+).*$", r"\1", url or "")
+
+
+def _looks_like_challenge(body: bytes) -> bool:
+    text = body[:6000].decode("utf-8", errors="replace").lower()
+    return len(body) < 3000 or any(h in text for h in _BOT_HINTS)
 
 
 def _read_capped(resp: requests.Response) -> bytes:
