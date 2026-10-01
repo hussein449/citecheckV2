@@ -196,10 +196,109 @@ def _order_blocks(blocks: list, page: fitz.Page) -> list:
     return ordered
 
 
+# Nature, Science and most biomedical journals cite with a bare superscript:
+# "statistical inference¹⁻⁵". Extracted as text that is "inference1–5", which
+# cannot be told from "Cas9", "hg38" or "RuleSet1" by its characters. The PDF
+# still knows which glyphs were raised, so the markers are read from the layout
+# and rewritten as "[1–5]", the form the rest of the pipeline already handles.
+_SUPERSCRIPT_CITE = re.compile(r"^\d{1,3}(?:\s*[,\-‐‑–—]\s*\d{1,3})*$")
+_SUPERSCRIPT_PART = re.compile(r"^[\d\s,\-‐‑–—]+$")
+_INLINE_BRACKET = re.compile(r"\S ?\[\d{1,3}(?:\s*[-–—,;]\s*\d{1,3})*\]")
+_FLAG_SUPERSCRIPT = 1
+_FLAG_ITALIC = 2
+
+
+def _superscript_runs(line: dict) -> list[tuple[int, int, float]]:
+    """(first span, one past the last, size) of each raised citation in *line*."""
+    spans = line.get("spans") or []
+    if not spans:
+        return []
+    full_size = max(span["size"] for span in spans)
+
+    def raised(span: dict) -> bool:
+        # The flag alone is not enough: it stays set on the full-size text that
+        # follows a superscript.
+        return bool(
+            span["flags"] & _FLAG_SUPERSCRIPT
+            and span["size"] < full_size * 0.85
+            and _SUPERSCRIPT_PART.match(span["text"])
+        )
+
+    runs: list[tuple[int, int, float]] = []
+    idx = 0
+    while idx < len(spans):
+        if not raised(spans[idx]):
+            idx += 1
+            continue
+        end = idx
+        while end < len(spans) and raised(spans[end]):
+            end += 1
+        text = "".join(span["text"] for span in spans[idx:end]).strip()
+        # A raised number after an italic letter is an exponent, not a citation.
+        after_variable = idx > 0 and spans[idx - 1]["flags"] & _FLAG_ITALIC
+        if _SUPERSCRIPT_CITE.match(text) and not after_variable:
+            runs.append((idx, end, round(spans[idx]["size"], 1)))
+        idx = end
+    return runs
+
+
+def _line_text(line: dict, cite_size: float | None) -> str:
+    spans = line.get("spans") or []
+    out: list[str] = []
+    at = 0
+    for start, end, size in _superscript_runs(line) if cite_size is not None else []:
+        if abs(size - cite_size) > 0.3:
+            continue
+        out.extend(span["text"] for span in spans[at:start])
+        raw = "".join(span["text"] for span in spans[start:end])
+        out.append(f"[{raw.strip()}]" + raw[len(raw.rstrip()):])
+        at = end
+    out.extend(span["text"] for span in spans[at:])
+    return "".join(out)
+
+
+def _marked_pages(doc: fitz.Document) -> list[str] | None:
+    """Page texts with superscript citations bracketed, or None if there are none.
+
+    Author affiliations and footnote marks are raised numbers too. Citations
+    are told from them by being set at one size throughout and by turning up on
+    page after page, where affiliations stay on the first.
+    """
+    layouts = [page.get_text("dict") for page in doc]
+    sizes: dict[float, set[int]] = {}
+    counts: dict[float, int] = {}
+    for number, layout in enumerate(layouts):
+        for block in layout["blocks"]:
+            for line in block.get("lines") or []:
+                for _, _, size in _superscript_runs(line):
+                    sizes.setdefault(size, set()).add(number)
+                    counts[size] = counts.get(size, 0) + 1
+    if not counts:
+        return None
+    cite_size = max(counts, key=counts.get)
+    if counts[cite_size] < 10 or len(sizes[cite_size]) < 3:
+        return None
+
+    pages: list[str] = []
+    for page, layout in zip(doc, layouts):
+        blocks = [
+            (*block["bbox"], "\n".join(_line_text(l, cite_size) for l in block["lines"]),
+             block.get("number", 0), 0)
+            for block in layout["blocks"]
+            if block.get("type") == 0
+        ]
+        pages.append(_join_blocks(blocks, page))
+    return pages
+
+
 def _page_text(page: fitz.Page) -> str:
     """Extract text in reading order, tolerating multi-column layouts."""
     # (x0, y0, x1, y1, text, block_no, block_type)
     blocks = [b for b in page.get_text("blocks") if len(b) < 7 or b[6] == 0]
+    return _join_blocks(blocks, page)
+
+
+def _join_blocks(blocks: list, page: fitz.Page) -> str:
     parts: list[str] = []
     for block in _order_blocks(blocks, page):
         chunk = (block[4] or "").strip()
@@ -215,6 +314,14 @@ def parse_pdf(path: str) -> ParsedPDF:
     doc = fitz.open(path)
     try:
         raw_pages = [_page_text(page) for page in doc]
+        # Only when the paper does not already cite in brackets: one that does
+        # uses its superscripts for something else.
+        marked = _marked_pages(doc)
+        if marked and sum(
+            len(_INLINE_BRACKET.findall(a)) - len(_INLINE_BRACKET.findall(b))
+            for a, b in zip(marked, raw_pages)
+        ) > sum(len(_INLINE_BRACKET.findall(b)) for b in raw_pages):
+            raw_pages = marked
         meta = {
             "title": (doc.metadata or {}).get("title") or "",
             "author": (doc.metadata or {}).get("author") or "",
@@ -263,12 +370,32 @@ def _split_references(pages: list[Page]) -> tuple[str, str, int | None]:
     if not lines:
         return joined, "", None
 
+    # "The latter part" is measured in lines and in characters, and either will
+    # do. Pages of tables and figures after the bibliography are nearly all
+    # short lines, which can push a heading two thirds of the way through the
+    # text down to a third of the way through the line count.
     earliest = int(len(lines) * 0.45)
-    heading_idx: int | None = None
-    for idx in range(len(lines) - 1, earliest - 1, -1):
-        if _REF_HEADING.match(lines[idx]):
-            heading_idx = idx
+    earliest_char = len(joined) * 0.45
+    candidates: list[int] = []
+    offset = len(joined)
+    for idx in range(len(lines) - 1, -1, -1):
+        offset -= len(lines[idx]) + 1
+        if idx < earliest and offset < earliest_char:
             break
+        if _REF_HEADING.match(lines[idx]):
+            candidates.append(idx)
+
+    # A table column headed "Reference" is the same line as the heading, and
+    # tables usually sit after the bibliography, so the last match is not
+    # always the right one. Take the last that is followed by actual entries.
+    heading_idx: int | None = candidates[0] if candidates else None
+    if len(candidates) > 1:
+        from .refs import parse_references
+
+        for idx in candidates:
+            if len(parse_references(_reference_tail(lines, idx))) >= 3:
+                heading_idx = idx
+                break
 
     if heading_idx is None:
         # Fall back: a run of lines that look like numbered bibliography entries.
@@ -278,6 +405,15 @@ def _split_references(pages: list[Page]) -> tuple[str, str, int | None]:
         return joined, "", None
 
     body = "\n".join(lines[:heading_idx])
+    refs = _reference_tail(lines, heading_idx)
+
+    consumed = len("\n".join(lines[:heading_idx]))
+    ref_page = _page_for_line_offset(pages, consumed)
+    return body, refs, ref_page
+
+
+def _reference_tail(lines: list[str], heading_idx: int) -> str:
+    """The bibliography text under the heading at ``lines[heading_idx]``."""
     tail = lines[heading_idx + 1 :]
 
     # Stop at an appendix / acknowledgements heading if one follows.
@@ -286,11 +422,7 @@ def _split_references(pages: list[Page]) -> tuple[str, str, int | None]:
         if idx > 5 and (_POST_REF_HEADING.match(line) or _opens_lettered_appendix(tail, idx)):
             end = idx
             break
-    refs = "\n".join(tail[:end])
-
-    consumed = len("\n".join(lines[:heading_idx]))
-    ref_page = _page_for_line_offset(pages, consumed)
-    return body, refs, ref_page
+    return "\n".join(tail[:end])
 
 
 def _opens_lettered_appendix(lines: list[str], idx: int) -> bool:

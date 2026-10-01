@@ -364,6 +364,35 @@ class ExtractionCleanupTest(unittest.TestCase):
         _, references, _ = pdf_parse._split_references([page])
         self.assertEqual(references.splitlines(), entries)
 
+    def test_table_column_headed_reference_is_not_the_bibliography(self):
+        """A "Reference" column in a table after the list must not win."""
+        entries = [f"[{i}] Smith, A. B. A title of some kind. Journal {i}, 1-9 (201{i})." for i in range(1, 8)]
+        table = ["Acknowledgements", "We thank everyone.", "Method", "Type", "Reference",
+                 "RuleSet1", "On-target", "7", "Azimuth", "On-target", "6"]
+        body = [f"Body line {i}." for i in range(20)]
+        page = pdf_parse.Page(1, "\n".join(body + ["References"] + entries + table))
+        _, references, _ = pdf_parse._split_references([page])
+        self.assertEqual(references.splitlines(), entries)
+
+    def test_superscript_citations_are_bracketed(self):
+        def span(text, size=10.0, flags=4):
+            return {"text": text, "size": size, "flags": flags}
+
+        raised = lambda text: span(text, 7.0, 5)
+        cited = {"spans": [span("statistical inference"), raised("1"), raised("–"),
+                           raised("5"), span(". Next", flags=5)]}
+        self.assertEqual(pdf_parse._line_text(cited, 7.0), "statistical inference[1–5]. Next")
+        # A name ending in a digit keeps it; only the raised number is a marker.
+        named = {"spans": [span("RuleSet1"), raised("7"), span(" and Cas9")]}
+        self.assertEqual(pdf_parse._line_text(named, 7.0), "RuleSet1[7] and Cas9")
+        # Exponents, primes and affiliation marks set at another size are not.
+        exponent = {"spans": [span("m", flags=6), raised("2")]}
+        self.assertEqual(pdf_parse._line_text(exponent, 7.0), "m2")
+        prime = {"spans": [span("the 5"), raised("′"), span(" end")]}
+        self.assertEqual(pdf_parse._line_text(prime, 7.0), "the 5′ end")
+        affiliation = {"spans": [span("Hoberecht"), span("1", 8.0, 5)]}
+        self.assertEqual(pdf_parse._line_text(affiliation, 7.0), "Hoberecht1")
+
     def test_title_opening_with_a_is_not_an_appendix(self):
         entries = [f"Author{c} Name. 201{i}. A title of some kind. Venue." for i, c in enumerate("abcdefgh")]
         entries[6:7] = ["Authorg Name. 2016.", "A", "Simple baseline. Venue."]

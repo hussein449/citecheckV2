@@ -44,6 +44,10 @@ CORPUS = {
     # sentence, LaTeX accents extracted as loose glyphs, and lettered appendices
     # whose numbered guideline list used to be taken for the bibliography.
     "acl_author_year": ("FEVER_original.pdf", "author-year", 24, 24, 0),
+    # Nature style: superscript citation numbers with no brackets, and a table
+    # after the bibliography whose "Reference" column header was taken for the
+    # bibliography heading.
+    "superscript_numeric": ("crisprVerse_original.pdf", "numeric", 105, 100, 0),
     "minimal": ("test_paper.pdf", "numeric", 5, 5, 0),
 }
 
