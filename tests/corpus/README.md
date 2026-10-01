@@ -21,6 +21,7 @@ run-id prefix the app adds (`20260806-193217-44149f_j.jclinepi…`) is fine.
 | `s13638-024-02373-5.pdf` | Springer, numeric. |
 | `Flying_ad_hoc_paper_1.pdf` | 149 references, numeric — the long case. |
 | `2017STOPSpeedRadar.pdf` | IEEE, numeric, quoted titles. |
+| `FEVER_original.pdf` | ACL author-year. Given-name-first entries ("Gabor Angeli and Christopher D. Manning. 2014."), LaTeX accents extracted as loose glyphs, and lettered appendices after the references whose numbered list was parsed as the bibliography. |
 | `test_paper.pdf` | Tiny five-reference smoke case. |
 
 ## Adding a paper

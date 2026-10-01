@@ -40,6 +40,10 @@ CORPUS = {
     "springer_numeric": ("s13638-024-02373-5.pdf", "numeric", 34, 34, 0),
     "long_numeric": ("Flying_ad_hoc_paper_1.pdf", "numeric", 145, 145, 0),
     "ieee_numeric": ("2017STOPSpeedRadar.pdf", "numeric", 22, 22, 0),
+    # ACL author-year: given-name-first entries with the year as its own
+    # sentence, LaTeX accents extracted as loose glyphs, and lettered appendices
+    # whose numbered guideline list used to be taken for the bibliography.
+    "acl_author_year": ("FEVER_original.pdf", "author-year", 24, 24, 0),
     "minimal": ("test_paper.pdf", "numeric", 5, 5, 0),
 }
 

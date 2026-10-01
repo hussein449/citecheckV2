@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import unittest
 
-from citecheck import intext, refs
+from citecheck import intext, pdf_parse, refs
 
 # ── Bibliography styles ──────────────────────────────────────────────────────
 # style -> (bibliography text, [(expected key, expected title fragment), …])
@@ -280,6 +280,75 @@ class LinkingTest(unittest.TestCase):
                 matched, orphans = self.link(bibliography, f"A survey exists {marker}.")
                 self.assertEqual(orphans, [], f"unmatched for {marker}")
                 self.assertEqual(len(matched), 1)
+
+    def test_given_name_first_with_year_sentence(self):
+        """ACL: given names spelled out, the year a sentence of its own.
+
+        Written the way a justified column extracts — author lists wrapped and
+        broken by blank lines — so neither line starts nor blocks mark entries.
+        """
+        bibliography = """
+            Gabor Angeli and Christopher D. Manning. 2014. NaturalLI: Natural logic inference for common sense
+            reasoning. In Proceedings of the 2014 Conference
+            on Empirical Methods in Natural Language Processing. pages 534-545.
+
+            Danqi Chen, Adam Fisch, Jason Weston, and Antoine
+
+            Bordes. 2017. Reading wikipedia to answer open-domain questions. In Proceedings of ACL (Volume 1:
+            Long Papers). https://doi.org/10.18653/v1/P17-1171.
+
+            Joseph L Fleiss. 1971. Measuring nominal scale agreement among many raters. Psychological bulletin
+            76(5):378.
+
+            P. Rajpurkar, J. Zhang, K. Lopyrev, and P. Liang. 2016.
+            SQuAD: 100,000+ questions for machine comprehension of text. In Empirical Methods in Natural
+            Language Processing (EMNLP).
+
+            Tim Rocktäschel and Sebastian Riedel. 2017. End-to-end differentiable proving. CoRR abs/1705.11040.
+        """
+        reference_list = refs.parse_references(bibliography)
+        self.assertEqual(
+            [r.title for r in reference_list],
+            [
+                "NaturalLI: Natural logic inference for common sense reasoning",
+                "Reading wikipedia to answer open-domain questions",
+                "Measuring nominal scale agreement among many raters",
+                "SQuAD: 100,000+ questions for machine comprehension of text",
+                "End-to-end differentiable proving",
+            ],
+        )
+        matched, orphans = self.link(
+            bibliography,
+            "Shown before (Angeli and Manning, 2014; Chen et al., 2017; Fleiss, 1971). "
+            "Rajpurkar et al. (2016) and others (Rocktäschel and Riedel, 2017) agree.",
+        )
+        self.assertEqual(orphans, [])
+        self.assertEqual(len(matched), 5)
+
+
+class ExtractionCleanupTest(unittest.TestCase):
+    """Repairs made to raw PDF text before anything reads citations out of it."""
+
+    def test_loose_latex_accents_are_composed(self):
+        text = pdf_parse._normalise_whitespace("Tim Rockt¨aschel and ´Alvaro Rodrigo")
+        self.assertEqual(text, "Tim Rocktäschel and Álvaro Rodrigo")
+
+    def test_lettered_appendix_ends_the_bibliography(self):
+        entries = [f"Author{c} Name. 201{i}. A title of some kind. Venue." for i, c in enumerate("abcdefgh")]
+        appendix = ["A", "Annotation Guidelines", "A.1", "Task Definitions",
+                    "1. Rephrase the claim.", "2. Negate the claim."]
+        body = [f"Body line {i}." for i in range(20)]
+        page = pdf_parse.Page(1, "\n".join(body + ["References"] + entries + appendix))
+        _, references, _ = pdf_parse._split_references([page])
+        self.assertEqual(references.splitlines(), entries)
+
+    def test_title_opening_with_a_is_not_an_appendix(self):
+        entries = [f"Author{c} Name. 201{i}. A title of some kind. Venue." for i, c in enumerate("abcdefgh")]
+        entries[6:7] = ["Authorg Name. 2016.", "A", "Simple baseline. Venue."]
+        body = [f"Body line {i}." for i in range(20)]
+        page = pdf_parse.Page(1, "\n".join(body + ["References"] + entries))
+        _, references, _ = pdf_parse._split_references([page])
+        self.assertEqual(references.splitlines(), entries)
 
 
 if __name__ == "__main__":

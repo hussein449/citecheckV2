@@ -161,7 +161,7 @@ this entire application. anystyle is Ruby. Both would have made "clone it and ru
 `python app.py`" untrue, which was a requirement. The bet was that a few hundred
 lines of carefully-tested pattern matching could cover the styles that actually
 turn up, and `tests/test_styles.py` is the receipt: APA, Harvard, Vancouver,
-IEEE, ACM, Nature, Chicago, MLA and the Elsevier/Springer numbered styles, in
+IEEE, ACM, ACL, Nature, Chicago, MLA and the Elsevier/Springer numbered styles, in
 every author order, with accented and double-barrelled surnames.
 
 **What the patterns had to survive**, each of which was a real failure before it

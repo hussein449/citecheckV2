@@ -73,7 +73,13 @@ def parse_references(refs_text: str) -> list[Reference]:
     return max(
         (
             _build_all(split(refs_text))
-            for split in (_split_author_year, _split_blocks, _split_year_anchored)
+            # A tie goes to the first, and the year-sentence split is the one
+            # that keeps a wrapped author list in one piece: blank-line blocks
+            # can find as many entries while keying one on its last author.
+            for split in (
+                _split_year_sentence, _split_author_year, _split_blocks,
+                _split_year_anchored,
+            )
         ),
         key=len,
     )
@@ -324,6 +330,23 @@ def _split_year_anchored(refs_text: str) -> list[tuple[int | None, str]]:
     ]
 
 
+def _split_year_sentence(refs_text: str) -> list[tuple[int | None, str]]:
+    """Split where an author run followed by a bare "2019." begins a new entry.
+
+    ACL and ACM print "Gabor Angeli and Christopher D. Manning. 2014. Title…":
+    given names first and spelled out, the year a sentence of its own. No
+    entry-initial surname pattern fits that, and in a justified column the
+    author list itself wraps and picks up blank lines, so neither line starts
+    nor blocks mark the entries either.
+    """
+    flat = re.sub(r"\s*\n\s*", " ", refs_text).strip()
+    starts = [0] + [m.end() for m in _YEAR_SENTENCE_HEAD.finditer(flat)]
+    return [
+        (None, flat[start:end])
+        for start, end in zip(starts, starts[1:] + [len(flat)])
+    ]
+
+
 def _build_reference(number: int | None, raw: str) -> Reference | None:
     doi = ""
     doi_match = _DOI.search(raw)
@@ -409,7 +432,9 @@ _INITIALS_HEAD = rf"(?:{_INITIAL}\s*){{1,4}}"
 # given name is spelled out in full, and the surname is the only part an
 # author-year marker ever prints. A comma or "&" ends the run, so it cannot run
 # on into the next author.
-_NAME_RUN = rf"{_NAME}(?:\s+(?:[{_U}]\.|{_NAME})){{0,3}}"
+# A middle initial may be printed bare ("Joseph L Fleiss"); stopping at it leaves
+# the given name standing in for the surname.
+_NAME_RUN = rf"{_NAME}(?:\s+(?:{_NAME}|[{_U}]\.|[{_U}](?=\s+[{_U}]))){{0,3}}"
 
 # A run of "Surname, A. B.," entries — the author block of a numeric-style entry.
 # Matching this explicitly avoids mistaking the final initial's period ("…,
@@ -478,6 +503,15 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
     # sentence boundaries can match — without this the comma inside the quotes
     # reads as an author separator and the title comes back as a fragment of
     # the venue. Checked first because it is evidence rather than heuristic.
+    # Style Y -- "Given Surname and Given Surname. 2019. Title. Venue." (ACL,
+    # ACM). The year sentence marks the end of the authors outright; left to the
+    # later styles, the period after a middle initial is read as that boundary
+    # and the title comes back as the last author's surname.
+    m = _YEAR_SENTENCE_ENTRY.match(stripped)
+    if m and len(m.group(2).strip()) >= 8:
+        title, venue = _first_sentence(m.group(2).strip())
+        return m.group(1).strip(" .,;&"), title, venue
+
     quoted = _QUOTED_TITLE.search(stripped)
     if quoted:
         title = quoted.group(1).strip(" .,;")
@@ -591,6 +625,24 @@ _AUTHOR_LIST = rf"[{_L}\s.,;&'’{_DASH}]{{0,200}}"
 _ENTRY_HEAD = re.compile(
     rf"(?<=[.])(?<![{_U}]\.)\s+"
     rf"(?={_AUTHOR_HEAD}{_AUTHOR_LIST}\(\s*(?:19|20)\d{{2}}[a-z]?\s*\))"
+)
+
+
+# The same idea for the year-as-a-sentence styles. Here nothing brackets the
+# year, so the author list has to be held tighter: the only periods it may
+# contain are the ones after an initial, "et al." or "Jr.". Any other period
+# ends a sentence, which means the text before it was a title or a venue.
+_YEAR_SENTENCE_AUTHORS = (
+    rf"(?:[{_L}\s,;&'’{_DASH}]"
+    rf"|(?<=\b[{_U}])\.|(?<=\bal)\.|(?<=\b[JS]r)\.){{0,400}}?"
+)
+_YEAR_SENTENCE = r"\.\s+(?:19|20)\d{2}[a-z]?\.\s"
+_YEAR_SENTENCE_HEAD = re.compile(
+    rf"(?<=[.])(?<!\b[{_U}]\.)\s+"
+    rf"(?={_AUTHOR_HEAD}{_YEAR_SENTENCE_AUTHORS}{_YEAR_SENTENCE})"
+)
+_YEAR_SENTENCE_ENTRY = re.compile(
+    rf"^\s*({_AUTHOR_HEAD}{_YEAR_SENTENCE_AUTHORS}){_YEAR_SENTENCE}\s*(.+)$"
 )
 
 

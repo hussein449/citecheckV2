@@ -534,7 +534,7 @@ the way in; anything else addressing a run directory is a path-traversal attempt
   most sources return only an abstract. Verdicts are made on that, and the
   report says so per reference. Setting `CITECHECK_CONTACT_EMAIL` measurably
   reduces how often this happens.
-- **Reference parsing is heuristic.** APA, Harvard, Vancouver, IEEE, ACM,
+- **Reference parsing is heuristic.** APA, Harvard, Vancouver, IEEE, ACM, ACL,
   Nature, Chicago, MLA and the Elsevier/Springer numbered styles are covered by
   tests, in every author order — "Surname, A.B.", "A.B. Surname", "AB Surname"
   and spelled-out given names — along with accented and double-barrelled

@@ -9,6 +9,7 @@ The rest of the pipeline needs three things out of a paper:
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 import fitz  # PyMuPDF
@@ -32,6 +33,13 @@ _POST_REF_HEADING = re.compile(
     r"biograph(?:y|ies)|funding|conflicts?\s+of\s+interest)\b",
     re.IGNORECASE,
 )
+
+# ACL, NeurIPS and most LaTeX templates letter their appendices and never print
+# the word: the section after the bibliography is headed "A  Annotation
+# Guidelines". PDF extraction usually puts the letter on a line of its own.
+_APPENDIX_TITLE = r"[A-Z][^.,;:\d]{2,60}"
+_APPENDIX_A = re.compile(rf"^\s*A(?:\s+{_APPENDIX_TITLE})?\s*$")
+_APPENDIX_NEXT = re.compile(rf"^\s*(?:A\.1\b|B(?:\s+{_APPENDIX_TITLE})?\s*$)")
 
 
 @dataclass
@@ -84,6 +92,31 @@ _ODD_SPACES = re.compile("[       ]")
 _LIGATURES = {"ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff",
               "ﬃ": "ffi", "ﬄ": "ffl"}
 
+# LaTeX draws an accented letter as two glyphs, the accent and then the letter,
+# and extraction hands them back in that order: "Rocktäschel" arrives as
+# "Rockt¨aschel" and "Álvaro" as "´Alvaro". The loose accent is not a letter, so
+# the surname stops matching halfway through and the citation is lost on both
+# sides — the marker in the prose and the entry in the bibliography.
+_LOOSE_ACCENTS = {
+    "\u00a8": "\u0308", "\u00b4": "\u0301", "\u02c6": "\u0302",
+    "\u02dc": "\u0303", "\u02c7": "\u030c", "\u02da": "\u030a",
+    "\u02d8": "\u0306", "\u00af": "\u0304", "\u02d9": "\u0307",
+}
+_DOTLESS_I = "\u0131"
+_LOOSE_ACCENT = re.compile(
+    "([" + "".join(_LOOSE_ACCENTS) + "])([A-Za-z" + _DOTLESS_I + "])"
+)
+
+
+def _compose_accents(text: str) -> str:
+    def compose(match: re.Match) -> str:
+        letter = "i" if match.group(2) == _DOTLESS_I else match.group(2)
+        composed = unicodedata.normalize("NFC", letter + _LOOSE_ACCENTS[match.group(1)])
+        # No such letter: leave the text exactly as it was printed.
+        return composed if len(composed) == 1 else match.group(0)
+
+    return _LOOSE_ACCENT.sub(compose, text)
+
 
 def _dehyphenate(text: str) -> str:
     """Rejoin words split across a line break: "agri-\ncultural" -> "agricultural"."""
@@ -101,6 +134,7 @@ def _normalise_whitespace(text: str) -> str:
     text = _ODD_SPACES.sub(" ", text)
     for ligature, plain in _LIGATURES.items():
         text = text.replace(ligature, plain)
+    text = _compose_accents(text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
@@ -249,7 +283,7 @@ def _split_references(pages: list[Page]) -> tuple[str, str, int | None]:
     # Stop at an appendix / acknowledgements heading if one follows.
     end = len(tail)
     for idx, line in enumerate(tail):
-        if idx > 5 and _POST_REF_HEADING.match(line):
+        if idx > 5 and (_POST_REF_HEADING.match(line) or _opens_lettered_appendix(tail, idx)):
             end = idx
             break
     refs = "\n".join(tail[:end])
@@ -257,6 +291,24 @@ def _split_references(pages: list[Page]) -> tuple[str, str, int | None]:
     consumed = len("\n".join(lines[:heading_idx]))
     ref_page = _page_for_line_offset(pages, consumed)
     return body, refs, ref_page
+
+
+def _opens_lettered_appendix(lines: list[str], idx: int) -> bool:
+    """Whether ``lines[idx]`` is the heading of a lettered "Appendix A".
+
+    A lone "A" is also how a wrapped title can begin, so the heading alone is
+    not enough: it only counts when the appendix goes on to number itself, with
+    an "A.1" subsection or a "B" heading further down. Without the cut, the
+    appendix is parsed as bibliography, and any numbered list inside it is taken
+    for a numbered reference list that replaces the real one.
+    """
+    line = lines[idx]
+    if not _APPENDIX_A.match(line):
+        return False
+    following = [l for l in lines[idx + 1 :] if l.strip()]
+    if line.strip() == "A" and not (following and re.match(r"\s*[A-Z]", following[0])):
+        return False
+    return any(_APPENDIX_NEXT.match(l) for l in following)
 
 
 def _guess_reference_start(lines: list[str], earliest: int) -> int | None:
