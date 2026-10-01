@@ -317,6 +317,11 @@ class LinkingTest(unittest.TestCase):
                 "End-to-end differentiable proving",
             ],
         )
+        # Keyed on the surname a marker prints, not on the given name before it.
+        self.assertEqual(
+            [r.key for r in reference_list][:4],
+            ["angeli2014", "chen2017", "fleiss1971", "rajpurkar2016"],
+        )
         matched, orphans = self.link(
             bibliography,
             "Shown before (Angeli and Manning, 2014; Chen et al., 2017; Fleiss, 1971). "
@@ -324,6 +329,23 @@ class LinkingTest(unittest.TestCase):
         )
         self.assertEqual(orphans, [])
         self.assertEqual(len(matched), 5)
+
+
+    def test_given_name_is_not_read_as_an_initial(self):
+        """ "Ido Dagan" is a name, not the initial "I" and a surname "do Dagan"."""
+        (ref,) = refs.parse_references(
+            "Ido Dagan and Dan Roth. 2009. Recognizing textual entailment. Venue 15(4)."
+        )
+        self.assertEqual(ref.key, "dagan2009")
+
+    def test_exclamation_inside_a_title_does_not_end_it(self):
+        (ref,) = refs.parse_references(
+            "Michael Heilman and Noah A. Smith. 2010. Good Question! statistical "
+            "ranking for question generation. In Proceedings of NAACL. pages 609-617."
+        )
+        self.assertEqual(
+            ref.title, "Good Question! statistical ranking for question generation"
+        )
 
 
 class ExtractionCleanupTest(unittest.TestCase):

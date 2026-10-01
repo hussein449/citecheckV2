@@ -382,9 +382,16 @@ def _build_reference(number: int | None, raw: str) -> Reference | None:
     else:
         # Derived from the same phrase the alias index works from, so an entry's
         # own key is always one of the keys a marker can reach it by.
-        words = _name_words(_entry_surname(authors or raw))
+        head = authors or raw
+        words = _name_words(_entry_surname(head))
         if not (words and year):
             return None
+        # A name with no initials to mark its surname is almost always a
+        # spelled-out given name followed by the surname ("Gabor Angeli"), so
+        # the last word is what a marker prints. The other words stay reachable
+        # as aliases, which covers the two-word surname this guesses wrong.
+        if not (_SURNAME_FIRST.match(head) or _INITIALS_FIRST.match(head)):
+            words = words[-1:]
         key = normalise_key("".join(words), year)
 
     return Reference(
@@ -422,8 +429,10 @@ _NAME = rf"{_PARTICLE}[{_U}][{_L}'’{_DASH}]+"      # a capitalised name word
 
 # One author's initials, however the publisher glues them together: "N", "N.",
 # "KW", "AAR", "J.M.", "H.-Y.". Kept greedy-free of the surname by requiring the
-# surname itself to start a fresh capitalised word.
-_INITIAL = rf"[{_U}]{{1,3}}\.?(?:\s*-\s*[{_L}]\.?)?"
+# surname itself to start a fresh capitalised word. A capital running straight
+# into lowercase is the start of a name, not an initial: "Ido Dagan" otherwise
+# reads as the initial "I" and the particled surname "do Dagan".
+_INITIAL = rf"[{_U}]{{1,3}}(?![a-zß-öø-ÿ])\.?(?:\s*-\s*[{_L}]\.?)?"
 _INITIALS_HEAD = rf"(?:{_INITIAL}\s*){{1,4}}"
 
 # One author's full name, however many parts it runs to: "Agatz", "Rashid
@@ -565,7 +574,9 @@ def _first_sentence(text: str) -> tuple[str, str]:
     # "?" and "!" close a title as surely as "." does, and review literature is
     # full of them ("What kind of review should I conduct?"). The question mark
     # is part of the title and stays; a full stop is punctuation and goes.
-    m = re.match(r"^(.{5,300}?)([.?!])\s+(.*)$", text)
+    # Only before a capital, though: "Good Question! statistical ranking for
+    # question generation" carries on in lowercase and is still one title.
+    m = re.match(r"^(.{5,300}?)(\.|[?!](?!\s+[a-z]))\s+(.*)$", text)
     if m:
         title = m.group(1).strip() + (m.group(2) if m.group(2) in "?!" else "")
         return title, m.group(3).strip()[:200]
