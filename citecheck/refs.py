@@ -62,6 +62,10 @@ def parse_references(refs_text: str) -> list[Reference]:
     if len(numbered) >= 2:
         return _build_all(numbered)
 
+    labelled = _split_alpha(refs_text)
+    if len(labelled) >= 2:
+        return _build_all(labelled)
+
     # Without entry numbers there is no unambiguous boundary marker, and each
     # way of guessing one fails on layouts the other handles: splitting on
     # entry-initial surnames misses authors whose given name is spelled out,
@@ -130,6 +134,19 @@ _BARE_MARKER = re.compile(
     r"(?m)^\s*()()(\d{1,3})\s+"
     r"(?=(?:[a-z]{2,3}\s+){0,2}[A-ZÀ-ÖØ-Þ][\w'’`\-]+(?:\s+[A-ZÀ-ÖØ-Þ][\w'’`\-]+)?,\s)"
 )
+
+
+# "[BJP12]", "[RMW+14]": the alpha style labels an entry with its authors'
+# initials and a two-digit year, and the text cites it by that label.
+_ALPHA_MARKER = re.compile(r"(?m)^\s*\[([A-Z][A-Za-z]{1,6}\+?\d{2}[a-z]?)\]\s*")
+
+
+def _split_alpha(refs_text: str) -> list[tuple[str, str]]:
+    matches = list(_ALPHA_MARKER.finditer(refs_text))
+    return _trim_last([
+        (match.group(1), refs_text[match.end(): nxt.start() if nxt else len(refs_text)])
+        for match, nxt in zip(matches, matches[1:] + [None])
+    ])
 
 
 def _split_numbered(refs_text: str) -> list[tuple[int | None, str]]:
@@ -434,7 +451,7 @@ def _build_reference(number: int | None, raw: str) -> Reference | None:
     years = [
         m for m in _YEAR.finditer(dated)
         if not re.match(r"\s*[\-‐‑–—]\s*\d", dated[m.end():m.end() + 4])
-        and not re.search(r"(?:\d\s*[\-‐‑–—]|[:(]|pp?\.)\s*$", dated[max(0, m.start() - 6):m.start()])
+        and not re.search(r"(?:\d\s*[\-‐‑–—]|:|pp?\.)\s*$", dated[max(0, m.start() - 6):m.start()])
     ] or list(_YEAR.finditer(dated))
     if years:
         year = years[0].group(1)
@@ -442,7 +459,12 @@ def _build_reference(number: int | None, raw: str) -> Reference | None:
 
     authors, title, venue = _split_fields(raw)
 
-    if number is not None:
+    label = number if isinstance(number, str) else ""
+    if label:
+        number = None
+    if label:
+        key = label
+    elif number is not None:
         key = str(number)
     else:
         # Derived from the same phrase the alias index works from, so an entry's
@@ -553,6 +575,13 @@ _VANCOUVER_RUN = re.compile(
     rf"(?:{_VANCOUVER_AUTHOR}|et\s+al)"         # the last one, or "et al."
     rf"(?:\s*,\s*(?:editors?|eds?))?\.)"        # edited books name their editors
 )
+_INITIALED = rf"(?:[{_U}]\.(?:\s*-?\s*[{_U}]\.)*\s*)+{_NAME}(?:\s+{_NAME})?"
+_INITIALS_THEN_STOP = re.compile(
+    # "A. One", "A. One and B. Two", "A. One, B. Two, and C. Three" — then a stop.
+    rf"^\s*({_INITIALED}(?:\s*,\s*{_INITIALED})*(?:\s*,?\s*(?:and|&)\s+{_INITIALED})?)"
+    rf"\.\s+(?![{_U}]\.)(.{{8,}})$",
+    re.S,
+)
 _LEADING_ETAL = re.compile(r"^(?:et\s+al\.?\s*,?\s*)+", re.IGNORECASE)
 
 # A quoted title, in whichever quote characters the typesetter used. Long enough
@@ -616,6 +645,15 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
 
     # Style B -- "Surname, A., Surname, B. Title. Venue, 2019."
     # Style B' -- "A. Surname, B. Surname, Title. Venue (2019)."
+    # Style I -- "Y. Bengio, P. Simard, and P. Frasconi. Title. Venue, 1994."
+    # Initials first and no quotation marks: the last author ends on a full
+    # stop, not a comma, so the run below stops one author short and the title
+    # comes back as "and P".
+    m = _INITIALS_THEN_STOP.match(stripped)
+    if m:
+        title, venue = _first_sentence(m.group(2).strip())
+        return m.group(1).strip(" .,;&"), title, venue
+
     for pattern in (_AUTHOR_RUN, _INITIALS_RUN, _VANCOUVER_RUN):
         run = pattern.match(stripped)
         if not (run and len(run.group(1)) >= 6):
@@ -759,10 +797,22 @@ _YEAR_SENTENCE_ENTRY = re.compile(
 # enough to open the next. After any other full stop ("... Oral Presentation.")
 # only the initials form is trusted: "Acoustics, Speech and Signal Processing"
 # is a journal, and it follows a full stop too.
+# Words that follow a year and a full stop without opening a new entry: the
+# publisher, a note, the editors of the volume.
+_NOT_AN_AUTHOR = (
+    r"(?!(?:In|URL|Proceedings|Proc|Curran|Springer|MIT|Morgan|Elsevier|IEEE|ACM|"
+    r"Technical|Tech|Available|Oral|Note|Also|Online|Association|Advances|Preprint|"
+    r"Unpublished|Submitted|To|Software|Version|Retrieved|Accessed|Cambridge|Oxford)\b)"
+)
 _YEAR_TERMINATED_HEAD = re.compile(
+    # after "...2011." — any run of name words, given names first or surname
+    # first, that goes on to a comma, an "and", or straight into a title
     rf"(?:(?<=\d{{4}}\.)|(?<=\d{{4}}[a-z]\.))\s+(?:\d{{1,3}}\s+)?"
-    rf"(?={_NAME}(?:\s+{_NAME})?,\s+(?:{_NAME}|[{_U}]\.))"
-    rf"|(?<=[{_L})]\.)(?<!\b[{_U}]\.)\s+(?={_NAME}(?:\s+{_NAME})?,\s+[{_U}]\.,?\s)"
+    rf"(?={_NOT_AN_AUTHOR}(?:[{_U}]\.\s*){{0,3}}{_NAME}(?:\s+(?:{_NAME}|[{_U}]\.?(?=[\s,]))){{0,3}}"
+    rf"(?:,|\s+and\s|\.\s+[{_U}]))"
+    # after any other full stop — only an unmistakable author list
+    rf"|(?<=[{_L})]\.)(?<!\b[{_U}]\.)\s+(?={_NOT_AN_AUTHOR}{_NAME}(?:\s+{_NAME})?,\s+"
+    rf"(?:[{_U}]\.,?\s|{_NAME},\s+{_NAME},\s+{_NAME}))"
 )
 # "Duchi, John, Hazan, Elad, and Singer, Yoram": nothing but names.
 _NAME_LIST = re.compile(
@@ -846,24 +896,69 @@ def _alias_index(references: list[Reference]) -> dict[str, Reference]:
     return {alias: found[0] for alias, found in candidates.items() if len(found) == 1}
 
 
-def _sole_author(ref: Reference) -> bool:
-    return not re.search(r"\band\b|&|\bet\s+al\b", ref.authors or ref.raw[:160])
+def _author_total(ref: Reference) -> int:
+    """1, 2, or 3 for "more than two", as a marker would have to print them."""
+    text = ref.authors or ref.raw[:200]
+    if re.search(r"\bet\s+al\b", text):
+        return 3
+    parts = [p for p in re.split(r",?\s+and\s+|\s*&\s*", text) if p.strip()]
+    if len(parts) == 1:
+        return 1 if text.count(",") <= 1 else 3
+    if len(parts) > 2:
+        return 3
+    first = parts[0].strip()
+    if "," not in first:
+        return 2
+    # "Kingma, D. P." and "Kingma, Diederik" are one person; "Kevin Clark,
+    # Minh-Thang Luong" are two.
+    surname, _, rest = first.partition(",")
+    one_person = "," not in rest and len(surname.split()) <= 2 and (
+        re.fullmatch(r"\s*(?:[A-Z]\.?\s*-?\s*){1,4}", rest) or len(rest.split()) <= 2
+    ) and len(surname.split()) == 1
+    return 2 if one_person else 3
 
 
-def _by_author_count(key: str, citations: list, references: list[Reference]) -> Reference | None:
-    """Tell two entries with one key apart by how the marker names its authors.
+def _label_total(label: str) -> int:
+    if re.search(r"\bet\s+al\b", label):
+        return 3
+    return 2 if re.search(r"\band\b|&", label) else 1
+
+
+def _split_shared_key(key: str, grouped: dict[str, list], references: list[Reference]) -> dict[str, Reference]:
+    """Tell entries with one key apart by how each marker names its authors.
 
     "(Graves, 2013)" and "(Graves et al., 2013)" key alike, and an index that
-    drops shared keys leaves both unreachable. The marker has not lost the
-    distinction: one names a sole author and the other does not.
+    drops shared keys leaves both entries unreachable. The markers have not
+    lost the distinction: one names a sole author, one a pair, one "et al.".
+    Each group of markers that fits exactly one entry is moved under a key of
+    its own ("graves2013/1", "graves2013/3"), along with that entry.
     """
     candidates = [r for r in references if r.key == key]
     if len(candidates) < 2:
-        return None
-    labels = " ".join(getattr(c, "label", "") for c in citations)
-    wants_sole = not re.search(r"\bet\s+al\b|\band\b|&", labels)
-    fitting = [r for r in candidates if _sole_author(r) == wants_sole]
-    return fitting[0] if len(fitting) == 1 else None
+        return {}
+    by_total: dict[int, list] = {}
+    for cite in grouped[key]:
+        by_total.setdefault(_label_total(getattr(cite, "label", "")), []).append(cite)
+
+    resolved: dict[str, Reference] = {}
+    left = []
+    for total, cites in by_total.items():
+        fitting = [r for r in candidates if _author_total(r) == total]
+        if len(fitting) != 1:
+            left.extend(cites)
+            continue
+        new_key = f"{key}/{total}"
+        fitting[0].key = new_key
+        for cite in cites:
+            cite.key = new_key
+        grouped[new_key] = cites
+        resolved[new_key] = fitting[0]
+    if resolved:
+        if left:
+            grouped[key] = left
+        else:
+            del grouped[key]
+    return resolved
 
 
 def link_citations(
@@ -875,10 +970,13 @@ def link_citations(
     matched: dict[str, Reference] = {}
     orphans: list[str] = []
     aliases = _alias_index(list(ref_index.values()))
-    for key in grouped:
-        ref = ref_index.get(key) or aliases.get(key) or _by_author_count(
-            key, grouped[key], all_references or []
-        )
+    for key in list(grouped):
+        ref = ref_index.get(key) or aliases.get(key)
+        if ref is None:
+            split = _split_shared_key(key, grouped, all_references or [])
+            matched.update(split)
+            if key not in grouped:
+                continue
         if ref is None and re.search(r"\d{4}[a-z]$", key):
             # The text says "2019a", the list just "2019".
             ref = ref_index.get(key[:-1]) or aliases.get(key[:-1])

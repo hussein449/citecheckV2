@@ -37,7 +37,12 @@ _POST_REF_HEADING = re.compile(
 )
 # ICLR and NeurIPS head an appendix "A  RUBBISH CLASS EXAMPLES": one letter, then
 # capitals. A reference entry is never a line of capitals.
-_CAPITALS_APPENDIX = re.compile(r"^\s*[A-Z]\s+[A-Z][A-Z0-9 \-:,&]{5,70}$")
+_CAPITALS_APPENDIX = re.compile(
+    r"^\s*[A-Z]\s+[A-Z][A-Z0-9 \-:,&]{5,70}$"
+    # CVPR: "A. Object Detection Baselines". Two or more capitalised words, so
+    # that an author's "A. Krizhevsky" at the start of a wrapped line is not one.
+    r"|^\s*A\.\s+(?:[A-Z][a-z]+\s+){1,6}[A-Z][a-z]+\s*$"
+)
 
 # ACL, NeurIPS and most LaTeX templates letter their appendices and never print
 # the word: the section after the bibliography is headed "A  Annotation
@@ -113,6 +118,9 @@ _LOOSE_ACCENT = re.compile(
 )
 
 
+_LOOSE_CEDILLA = re.compile("([cCsStT])\u00b8 ?(?=[a-z])")
+
+
 def _compose_accents(text: str) -> str:
     def compose(match: re.Match) -> str:
         letter = "i" if match.group(2) == _DOTLESS_I else match.group(2)
@@ -120,7 +128,12 @@ def _compose_accents(text: str) -> str:
         # No such letter: leave the text exactly as it was printed.
         return composed if len(composed) == 1 else match.group(0)
 
-    return _LOOSE_ACCENT.sub(compose, text)
+    text = _LOOSE_ACCENT.sub(compose, text)
+    # The cedilla is drawn after its letter, and sometimes with a gap before
+    # the rest of the word: "Gülc¸ehre, C¸ aglar".
+    return _LOOSE_CEDILLA.sub(
+        lambda m: unicodedata.normalize("NFC", m.group(1) + "\u0327"), text
+    )
 
 
 def _dehyphenate(text: str) -> str:
@@ -361,8 +374,13 @@ def _assemble(raw_pages: list[str]) -> tuple[list[Page], str, str, int | None]:
     # Identify repeated headers/footers so they don't pollute sentences.
     line_counts: dict[str, int] = {}
     for text in raw_pages:
-        for line in {l.strip() for l in text.splitlines() if l.strip()}:
-            key = re.sub(r"\d+", "#", line.lower())
+        # Once per page, counted after the digits are masked. Counted before,
+        # the "(1916)." and "(1918)." ending two entries on one page were two
+        # sightings of "(#).", and a reference list wrapped that way put the
+        # line on "more pages than the paper has": every such year was deleted
+        # as a running header, and so was every entry that was a bare URL.
+        keys = {re.sub(r"\d+", "#", l.strip().lower()) for l in text.splitlines() if l.strip()}
+        for key in keys:
             line_counts[key] = line_counts.get(key, 0) + 1
 
     pages: list[Page] = []

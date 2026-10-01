@@ -73,7 +73,7 @@ is stored server-side.
 
 For each numbered reference in an uploaded PDF:
 
-1. **Finds the citing sentences.** Handles `[1]`, `[1, 2]`, `[1-4]`,
+1. **Finds the citing sentences.** Handles `[1]`, `[1, 2]`, `[1-4]`, letter labels like `[BJP12]`,
    superscript numbers (Nature style, read from the PDF layout) and
    author–year styles, expanding ranges and recording the page. Each marker is
    then cut down to the clause it actually governs — see

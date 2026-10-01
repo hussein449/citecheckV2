@@ -134,7 +134,12 @@ class SurnameGivenStyleTest(unittest.TestCase):
             grouped, refs.index_references(self.parsed), self.parsed
         )
         self.assertEqual(orphans, [])
-        self.assertEqual(len(matched), 1)   # one key, resolved rather than dropped
+        # One key in the text, two entries in the list: each marker reaches its own.
+        self.assertEqual(
+            sorted(r.title for r in matched.values()),
+            ["Generating sequences with recurrent neural networks",
+             "Speech recognition with deep recurrent neural networks"],
+        )
 
 
 class YearSuffixTest(unittest.TestCase):
@@ -200,6 +205,99 @@ class IntervalTest(unittest.TestCase):
         text = " ".join(f"Claim {i} holds [{i}]." for i in range(1, 8))
         text += " It was predicted in graphene.[9]Among these possibilities one stands out."
         self.assertIn("9", {c.key for c in intext.extract_citations(text)})
+
+
+class SquareBracketAuthorYearTest(unittest.TestCase):
+    """natbib's "square" option: "[Ioffe and Szegedy, 2015]"."""
+
+    TEXT = (
+        "Batch normalization [Ioffe and Szegedy, 2015] helps. It was extended to recurrent "
+        "networks [Laurent et al., 2015, Amodei et al., 2015, Cooijmans et al., 2016]. "
+        "Kingma and Ba [2014] proposed Adam. Others agree [see, e.g., Graves, 2013]. "
+        "It is used widely [Peters et al., 2017, 2018a]."
+    )
+
+    def test_every_marker_is_read(self):
+        citations = intext.extract_citations(self.TEXT)
+        self.assertEqual({c.style for c in citations}, {"author-year"})
+        self.assertEqual(
+            sorted({c.key for c in citations}),
+            sorted(["ioffe2015", "laurent2015", "amodei2015", "cooijmans2016", "kingma2014",
+                    "graves2013", "peters2017", "peters2018a"]),
+        )
+
+    def test_lead_in_inside_round_brackets(self):
+        text = self.TEXT + " Phrase-based systems (see, e.g., Koehn et al., 2003) differ."
+        self.assertIn("koehn2003", {c.key for c in intext.extract_citations(text)})
+
+
+class AlphaLabelTest(unittest.TestCase):
+    """The alpha style: "[BJP12]" in the text and on the entry."""
+
+    LIST = """
+        [BCV13]
+        Yoshua Bengio, Aaron Courville, and Pascal Vincent. Representation learning: A review and new perspectives. 2013.
+
+        [BJP12]
+        David M Blei, Michael I Jordan, and John W Paisley. Variational Bayesian inference
+        with Stochastic Search. In Proceedings of ICML, 2012.
+
+        [RMW+14]
+        Danilo J Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic back-propagation and variational inference. 2014.
+    """
+    TEXT = " ".join(f"Point {i} was made in [BJP12]." for i in range(4)) + " See also [BCV13, RMW+14]."
+
+    def test_labels_link_text_to_entries(self):
+        parsed = refs.parse_references(self.LIST)
+        self.assertEqual([r.key for r in parsed], ["BCV13", "BJP12", "RMW+14"])
+        self.assertTrue(parsed[1].title.startswith("Variational Bayesian inference"))
+        citations = intext.extract_citations(self.TEXT)
+        self.assertEqual({c.style for c in citations}, {"alpha"})
+        matched, orphans = refs.link_citations(
+            intext.group_by_reference(citations), refs.index_references(parsed), parsed
+        )
+        self.assertEqual(sorted(matched), ["BCV13", "BJP12", "RMW+14"])
+        self.assertEqual(orphans, [])
+
+
+class InitialsFirstUnquotedTest(unittest.TestCase):
+    """CVPR: "Y. Bengio, P. Simard, and P. Frasconi. Title. Venue, 1994."."""
+
+    def fields(self, raw):
+        return refs._split_fields(raw)[:2]
+
+    def test_the_last_author_is_an_author(self):
+        for raw, authors in (
+            ("Y. Bengio, P. Simard, and P. Frasconi. Learning long-term dependencies with gradient "
+             "descent is difficult. IEEE Transactions on Neural Networks, 5(2):157-166, 1994",
+             "Y. Bengio, P. Simard, and P. Frasconi"),
+            ("M. D. Zeiler and R. Fergus. Learning long-term dependencies with gradient descent "
+             "is difficult. In ECCV, 2014", "M. D. Zeiler and R. Fergus"),
+            ("C. M. Bishop. Learning long-term dependencies with gradient descent is difficult. "
+             "Oxford university press, 1995", "C. M. Bishop"),
+        ):
+            with self.subTest(raw=raw[:30]):
+                self.assertEqual(
+                    self.fields(raw),
+                    (authors, "Learning long-term dependencies with gradient descent is difficult"),
+                )
+
+
+class WrappedYearTest(unittest.TestCase):
+    def test_years_on_their_own_line_are_not_running_headers(self):
+        """ "(1916)." and "(1918)." on one page are not a header seen twice."""
+        pages = []
+        for n in range(4):
+            lines = [f"Body text of page {n} goes on for a while here."] * 6
+            if n == 3:
+                lines = ["[1] A. Einstein, Sitzungsber. K. Preuss. Akad. Wiss. 1, 688", "(1916).",
+                         "[2] A. Einstein, Sitzungsber. K. Preuss. Akad. Wiss. 1, 154", "(1918).",
+                         "[3] P. R. Saulson, Gen. Relativ. Gravit. 43, 3289", "(2011).",
+                         "[4] D. Finkelstein, Phys. Rev. 110, 965", "(1958)."]
+            pages.append("\n".join(lines))
+        assembled, _, _, _ = pdf_parse._assemble(pages)
+        self.assertIn("(1916).", assembled[3].text)
+        self.assertIn("(1958).", assembled[3].text)
 
 
 if __name__ == "__main__":

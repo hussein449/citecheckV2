@@ -62,6 +62,22 @@ CORPUS = {
     "no_heading_two_column": ("arxiv_1707.04344_51atom.pdf", "numeric", 62, 62, 0),
     #   no heading, superscript citations, entries labelled "12 Surname, A."
     "bare_number_labels": ("arxiv_1610.08057_dtc.pdf", "numeric", 34, 33, 0),
+    # A second unseen batch, checked against each paper's own LaTeX source.
+    "nips_numeric": ("arxiv_1706.03762.pdf", "numeric", 40, 40, 0),
+    "acl_three_word_surname": ("arxiv_1810.04805.pdf", "author-year", 56, 56, 0),
+    #   unquoted titles after initials-first authors; "[256, 480]" is a range
+    "cvpr_unquoted_titles": ("arxiv_1512.03385.pdf", "numeric", 50, 50, 2),
+    #   "[BJP12]" labels
+    "alpha_labels": ("arxiv_1312.6114.pdf", "alpha", 17, 17, 0),
+    "nips_surname_first": ("arxiv_1406.2661.pdf", "numeric", 31, 31, 0),
+    #   one entry is undated ("(unpublished)") and cannot be keyed
+    "icml_surname_given": ("arxiv_1502.03167.pdf", "author-year", 23, 20, 0),
+    "lncs_numbered": ("arxiv_1505.04597.pdf", "numeric", 14, 14, 0),
+    #   years wrapped onto their own line, entries that are bare URLs
+    "prl_wrapped_years": ("arxiv_1602.03837.pdf", "numeric", 118, 118, 0),
+    "iclr_author_year": ("arxiv_1409.1556.pdf", "author-year", 34, 34, 0),
+    #   "[Ioffe and Szegedy, 2015]"
+    "square_bracket_author_year": ("arxiv_1607.06450.pdf", "author-year", 32, 32, 0),
     "minimal": ("test_paper.pdf", "numeric", 5, 5, 0),
 }
 

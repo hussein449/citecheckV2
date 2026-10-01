@@ -30,17 +30,29 @@ _U = r"A-ZÀ-ÖØ-Þ"
 _L = r"A-Za-zÀ-ÖØ-öø-ÿĀ-ſ"
 _NAME_WORD = rf"[{_U}][{_L}'’\-]+"
 # A surname printed as two words: "Betti Sorbelli", "Rojas Viloria".
-_SURNAME = rf"{_NAME_WORD}(?:\s+{_NAME_WORD})?"
+_SURNAME = rf"{_NAME_WORD}(?:\s+{_NAME_WORD}){{0,2}}"
 # "Smith" / "Smith et al." / "Smith & Jones". "et al." has to stand on its own:
 # unlike "and"/"&" it is never followed by another surname, and requiring one
 # there silently drops every multi-author citation in the paper.
 _AUTHORS = rf"{_SURNAME}(?:\s+et\s+al\.?|\s*(?:and|&)\s*{_SURNAME})?"
 
 # Author-year styles: (Smith, 2019) (Smith & Jones 2019; Doe et al., 2020)
+# natbib's "\citep[see, e.g.,][]{...}" puts a lead-in inside the brackets.
+_LEAD_IN = r"(?:(?:see|also|e\.g\.|cf\.|c\.f\.|i\.e\.|compare)[,\s]+){0,3}"
 _AUTHOR_YEAR = re.compile(
-    rf"\(\s*({_AUTHORS}(?:\s*,\s*)?\s*(?:19|20)\d{{2}}[a-z]?"
-    rf"(?:\s*;\s*[^()]{{3,80}}?(?:19|20)\d{{2}}[a-z]?)*)\s*\)"
+    rf"\(\s*({_LEAD_IN}{_AUTHORS}(?:\s*,\s*)?\s*(?:19|20)\d{{2}}[a-z]?"
+    rf"(?:\s*[;,]\s*[^()]{{3,80}}?(?:19|20)\d{{2}}[a-z]?|\s*,\s*(?:19|20)\d{{2}}[a-z]?)*)\s*\)"
 )
+# The same markers in square brackets, which natbib's "square" option prints:
+# "[Ioffe and Szegedy, 2015]", "Kingma and Ba [2014]".
+_AUTHOR_YEAR_SQUARE = re.compile(
+    rf"\[\s*({_LEAD_IN}{_AUTHORS}(?:\s*,\s*)?\s*(?:19|20)\d{{2}}[a-z]?"
+    rf"(?:\s*[;,]\s*[^\[\]]{{3,80}}?(?:19|20)\d{{2}}[a-z]?|\s*,\s*(?:19|20)\d{{2}}[a-z]?)*)\s*\]"
+)
+# Labels built from author initials and a two-digit year: "[BJP12]", "[KW13]",
+# "[RMW+14]". The "alpha" bibliography style; the label is the key.
+_ALPHA_LABEL = r"[A-Z][A-Za-z]{1,6}\+?\d{2}[a-z]?"
+_ALPHA = re.compile(rf"\[\s*({_ALPHA_LABEL}(?:\s*[,;]\s*{_ALPHA_LABEL})*)\s*\]")
 
 # Narrative author-year: Smith et al. (2019) showed ...
 # The surname stays one word here. The parenthetical form is anchored by its
@@ -48,7 +60,7 @@ _AUTHOR_YEAR = re.compile(
 # ordinary preceding word be read as part of the name ("However Smith (2019)").
 _NARRATIVE = re.compile(
     rf"\b({_NAME_WORD}(?:\s+et\s+al\.?|\s*(?:and|&)\s*{_NAME_WORD})?)"
-    rf"\s*\(\s*((?:19|20)\d{{2}}[a-z]?)\s*\)"
+    rf"\s*(?:\(\s*((?:19|20)\d{{2}}[a-z]?)\s*\)|\[\s*((?:19|20)\d{{2}}[a-z]?)\s*\])"
 )
 
 # Capitalised words that open an author-year marker but are never surnames.
@@ -233,15 +245,28 @@ def _expand_numeric(group: str) -> list[str]:
 def _author_year_keys(group: str) -> list[tuple[str, str]]:
     """Split a possibly multi-citation parenthetical into (key, label) pairs."""
     out: list[tuple[str, str]] = []
-    for chunk in re.split(r"\s*;\s*", group):
-        chunk = chunk.strip()
-        year = re.search(r"((?:19|20)\d{2}[a-z]?)(?![a-z])", chunk)
+    # Works are separated by semicolons, or by commas in the styles that
+        # print "[Laurent et al., 2015, Amodei et al., 2015]". A comma also sits
+        # inside one work's author list ("Smith, Jones, and Lee, 2019"), so a
+        # piece with no year of its own belongs to the piece after it.
+    pieces: list[str] = []
+    held = ""
+    for piece in re.split(rf"\s*;\s*|,\s+(?={_NAME_WORD})", group):
+        held = f"{held}, {piece}" if held else piece
+        if re.search(r"(?:19|20)\d{2}", piece):
+            pieces.append(held)
+            held = ""
+    for chunk in pieces:
+        chunk = re.sub(rf"^{_LEAD_IN}", "", chunk.strip())
+        # "Peters et al., 2017, 2018a" is two works by the same authors.
+        years = re.findall(r"((?:19|20)\d{2}[a-z]?)(?![a-z\d])", chunk)
         name = re.match(rf"({_NAME_WORD})", chunk)
-        if not (year and name):
+        if not (years and name):
             continue
         if name.group(1).lower() in _NOT_A_SURNAME:
             continue
-        out.append((normalise_key(name.group(1), year.group(1)), chunk))
+        for year in dict.fromkeys(years):
+            out.append((normalise_key(name.group(1), year), chunk))
     return out
 
 
@@ -272,13 +297,29 @@ def _markers_in(sentence: str) -> list[_Marker]:
                         [(key, f"({label})") for key, label in pairs])
             )
 
+    for match in _AUTHOR_YEAR_SQUARE.finditer(sentence):
+        pairs = _author_year_keys(match.group(1))
+        if pairs:
+            found.append(
+                _Marker(match.start(), match.end(), "author-year",
+                        [(key, f"[{label}]") for key, label in pairs])
+            )
+
     for match in _NARRATIVE.finditer(sentence):
         surname = match.group(1).split()[0]
         if surname.lower() in _NOT_A_SURNAME:
             continue
+        year = match.group(2) or match.group(3)
         found.append(
             _Marker(match.start(), match.end(), "author-year",
-                    [(normalise_key(surname, match.group(2)), match.group(0))])
+                    [(normalise_key(surname, year), match.group(0))])
+        )
+
+    for match in _ALPHA.finditer(sentence):
+        labels = re.split(r"\s*[,;]\s*", match.group(1))
+        found.append(
+            _Marker(match.start(), match.end(), "alpha",
+                    [(label, f"[{label}]") for label in labels])
         )
 
     # The narrative and parenthetical patterns can both claim the same brackets.
@@ -456,8 +497,7 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
     """
     flat = _Flat(body_text)
     citations: list[Citation] = []
-    numeric_hits = 0
-    author_year_hits = 0
+    hits = {"numeric": 0, "author-year": 0, "alpha": 0}
 
     for sent_offset, sentence in _sentences_of(flat.text):
         markers = _markers_in(sentence)
@@ -476,10 +516,7 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
             # verdict about somebody else's row.
             context = claim if leading else sentence
             window = _window(context, 0 if leading else marker.start)
-            if marker.style == "numeric":
-                numeric_hits += len(marker.keys)
-            else:
-                author_year_hits += len(marker.keys)
+            hits[marker.style] += len(marker.keys)
 
             for key, label in marker.keys:
                 citations.append(
@@ -504,8 +541,9 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
     # outright — the latter threw away every real citation in an author-year
     # review whose tables happened to number their rows, leaving nothing to
     # check and a bibliography that matched none of the surviving markers.
-    if numeric_hits >= 5 or author_year_hits >= 5:
-        winner = "numeric" if numeric_hits >= author_year_hits else "author-year"
+    if max(hits.values()) >= 5:
+        # Ties go to the earlier style: numeric, then author-year, then alpha.
+        winner = max(hits, key=lambda style: hits[style])
         citations = [c for c in citations if c.style == winner]
         if winner == "author-year":
             citations.extend(_table_cell_citations(body_text, page_of_offset))
