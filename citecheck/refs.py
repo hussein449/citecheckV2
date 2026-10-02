@@ -185,6 +185,13 @@ def _split_numbered(refs_text: str) -> list[tuple[int | None, str]]:
     chunks = _split_on(_ENTRY_MARKER, refs_text)
     if len(chunks) < 2:
         chunks = _split_on(_BARE_MARKER, refs_text)
+        # A page number above an entry that opens "Dosovitskiy, Alexey" is the
+        # same shape as a bare label. Two of those on an unnumbered list were
+        # read as entries 11 and 12 of a numbered one, and the other thirty-five
+        # references were gone. A real list starts at 1 and keeps counting.
+        numbers = [n for n, _ in chunks]
+        if len(numbers) < 3 or 1 not in numbers[:2]:
+            chunks = []
     return _trim_last(chunks)
 
 

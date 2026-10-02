@@ -362,6 +362,27 @@ class YearListTest(unittest.TestCase):
         self.assertLessEqual({"radford2018", "radford2019"}, keys)
 
 
+class PageNumberIsNotALabelTest(unittest.TestCase):
+    def test_page_numbers_between_entries_do_not_number_the_list(self):
+        """ "11" above "Dosovitskiy, Alexey, ..." is a page number, not entry 11."""
+        text = """
+            Coates, Adam and Ng, Andrew Y. Learning feature representations with k-means. In Neural Networks, 2012.
+
+            Denton, Emily, Chintala, Soumith, and Fergus, Rob. Deep generative image models. arXiv, 2015.
+            11
+            Dosovitskiy, Alexey, Fischer, Philipp, and Brox, Thomas. Discriminative unsupervised feature learning. In PAMI, 2015.
+
+            Goodfellow, Ian J., Mirza, Mehdi, and Bengio, Yoshua. Generative adversarial nets. NIPS, 2014.
+            12
+            Netzer, Yuval, Wang, Tao, and Ng, Andrew Y. Reading digits in natural images. In NIPS workshop, 2011.
+        """
+        parsed = refs.parse_references(text)
+        self.assertEqual(
+            [r.key for r in parsed],
+            ["coates2012", "denton2015", "dosovitskiy2015", "goodfellow2014", "netzer2011"],
+        )
+
+
 class WrappedYearTest(unittest.TestCase):
     def test_years_on_their_own_line_are_not_running_headers(self):
         """ "(1916)." and "(1918)." on one page are not a header seen twice."""
