@@ -104,6 +104,59 @@ class MarkerPrecisionTest(unittest.TestCase):
         self.assertTrue(all(c.prose for c in citations), "prose misread as a table row")
 
 
+class BlockBoundaryTest(unittest.TestCase):
+    """A heading or a list item ends a sentence that no full stop does."""
+
+    def sentence_for(self, text: str, key: str, page_of_offset=None) -> str:
+        cites = [c for c in intext.extract_citations(text, page_of_offset) if c.key == key]
+        self.assertEqual(len(cites), 1)
+        return cites[0].sentence
+
+    def test_a_heading_is_not_part_of_the_sentences_around_it(self):
+        text = (
+            "Errors propagate across modules [7], undermining the minutes.\n\n"
+            "1.1 Technical & Domain Challenges\n\n"
+            "Automating documentation presents hurdles for every system [8].\n\n"
+            "2 \nRELATED WORK\n\n"
+            "Diarization answers the question of who spoke when [9]."
+        )
+        self.assertEqual(self.sentence_for(text, "7"),
+                         "Errors propagate across modules [7], undermining the minutes.")
+        self.assertEqual(self.sentence_for(text, "8"),
+                         "Automating documentation presents hurdles for every system [8].")
+        self.assertEqual(self.sentence_for(text, "9"),
+                         "Diarization answers the question of who spoke when [9].")
+
+    def test_each_list_item_is_its_own_sentence(self):
+        text = (
+            "We fine-tuned the model using low-rank adaptation [9]:\n"
+            " \nAdapter Configuration: Modules were applied to every layer [4].\n"
+            " \nAction-Item Binding: The engine maps commitments to assignees [31]\n"
+            "• Structured Output: A prompt forces a standard document [5]."
+        )
+        self.assertEqual(self.sentence_for(text, "9"),
+                         "We fine-tuned the model using low-rank adaptation [9]:")
+        self.assertEqual(self.sentence_for(text, "31"),
+                         "Action-Item Binding: The engine maps commitments to assignees [31]")
+        self.assertEqual(self.sentence_for(text, "5"),
+                         "Structured Output: A prompt forces a standard document [5].")
+
+    def test_a_page_number_does_not_join_two_sentences(self):
+        first = "Naive systems misattribute overlapping speech [15].\n\n3"
+        second = "Modern frameworks resolve overlap in several stages [10]."
+        text = first + "\n" + second
+        page = lambda offset: 1 if offset <= len(first) else 2
+        self.assertEqual(self.sentence_for(text, "10", page), second)
+
+    def test_a_wrapped_line_of_prose_is_not_a_heading(self):
+        text = (
+            "The corpus was recorded in three cities and annotated by the\n"
+            "New York University Linguistics Department\n"
+            "over two years, as described in the original release [6]."
+        )
+        self.assertTrue(self.sentence_for(text, "6").startswith("The corpus was recorded"))
+
+
 class SentenceOffsetTest(unittest.TestCase):
     """Offsets have to index the text as given, or page numbers drift."""
 

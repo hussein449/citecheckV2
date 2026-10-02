@@ -16,7 +16,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import re
+import time
 from dataclasses import dataclass, field, asdict
 
 from rapidfuzz import fuzz
@@ -737,6 +739,42 @@ def _complete(client, model: str, prompt: str, spec: "Provider | None" = None):
     raise AssertionError("unreachable: the last format step re-raises")
 
 
+# How long one judging call will wait out a rate limit before giving up.
+_RATE_LIMIT_PATIENCE = 75.0
+_RETRY_AFTER = re.compile(r"try again in ([\d.]+)\s*(ms|s)\b", re.I)
+
+
+def _complete_patiently(client, model: str, prompt: str, spec: "Provider | None" = None):
+    """`_complete`, waiting out a tokens-per-minute limit instead of failing.
+
+    A full-text source is some six thousand tokens a call, and an account on the
+    lowest tier is allowed thirty thousand a minute — so four workers judging
+    PDFs exceed it within seconds, and the SDK's own two quick retries land
+    inside the same minute. Those claims then came back "could not be judged",
+    and they were precisely the ones with the best evidence behind them. The
+    service says how long to wait; waiting is all it takes.
+    """
+    waited = 0.0
+    while True:
+        try:
+            return _complete(client, model, prompt, spec)
+        except Exception as exc:
+            text = str(exc)
+            # An exhausted quota is also a 429, and no amount of waiting fixes it.
+            if getattr(exc, "status_code", None) != 429 or "insufficient_quota" in text:
+                raise
+            hint = _RETRY_AFTER.search(text)
+            delay = 5.0
+            if hint:
+                delay = float(hint.group(1)) / (1000 if hint.group(2).lower() == "ms" else 1)
+            # Every worker is told the same moment; spread them out past it.
+            delay = min(20.0, delay) + random.uniform(0.5, 3.0)
+            if waited + delay > _RATE_LIMIT_PATIENCE:
+                raise
+            time.sleep(delay)
+            waited += delay
+
+
 def _rejects_format(exc: Exception) -> bool:
     """Whether *exc* is the service refusing the requested output format."""
     text = str(exc).lower()
@@ -850,7 +888,7 @@ def openai_match(
 
     try:
         client = openai.OpenAI(api_key=llm.key(), base_url=llm.endpoint())
-        response = _complete(client, model, prompt, llm.spec)
+        response = _complete_patiently(client, model, prompt, llm.spec)
     except Exception as exc:
         return MatchResult(
             engine="openai-error",

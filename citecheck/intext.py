@@ -140,27 +140,54 @@ class _Flat:
     page it is on, and the report's deep links land in the wrong place.
     """
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, page_of_offset=None) -> None:
+        lines: list[tuple[int, str]] = []
+        cursor = 0
+        for gap in re.finditer(r"\s*\n\s*", text):
+            if gap.start() > cursor:
+                lines.append((cursor, text[cursor : gap.start()]))
+            cursor = gap.end()
+        if text[cursor:]:
+            lines.append((cursor, text[cursor:]))
+        if page_of_offset is not None:
+            lines = _without_page_numbers(lines, page_of_offset)
+
         parts: list[str] = []
         self._flat_starts: list[int] = [0]
         self._orig_starts: list[int] = [0]
+        # Offsets in the flattened text where a new block starts whatever the
+        # punctuation says: a list item, or the line after a heading.
+        self.breaks: list[int] = []
         length = 0
-        cursor = 0
-        for gap in re.finditer(r"\s*\n\s*", text):
-            chunk = text[cursor : gap.start()]
-            if chunk:
-                self._flat_starts.append(length)
-                self._orig_starts.append(cursor)
-                parts.append(chunk)
-                length += len(chunk)
-            parts.append(" ")
-            length += 1
-            cursor = gap.end()
-        tail = text[cursor:]
-        if tail:
+        # What the line above was: "" for running text, else "heading"/"bullet".
+        above = "heading"
+        pending = False
+        for index, (start, chunk) in enumerate(lines):
+            closed = above == "heading" or (bool(parts) and _closes_sentence(parts[-1]))
+            following = lines[index + 1][1] if index + 1 < len(lines) else ""
+            kind = ""
+            bullet = _BULLET.match(chunk) or (closed and _SOFT_BULLET.match(chunk))
+            if bullet:
+                kind = "bullet"
+                start += bullet.end()
+                chunk = chunk[bullet.end():]
+            elif _is_heading(chunk, closed, following):
+                kind = "heading"
+            if not chunk:
+                # The glyph sat on a line of its own; the item is the next line.
+                pending = True
+                continue
+            if parts:
+                parts.append(" ")
+                length += 1
+                if kind or pending:
+                    self.breaks.append(length)
             self._flat_starts.append(length)
-            self._orig_starts.append(cursor)
-            parts.append(tail)
+            self._orig_starts.append(start)
+            parts.append(chunk)
+            length += len(chunk)
+            pending = kind == "heading"
+            above = "heading" if kind == "heading" else ""
         self.text = "".join(parts)
 
     def origin(self, offset: int) -> int:
@@ -182,21 +209,26 @@ def _is_real_boundary(flat: str, dot_index: int) -> bool:
     return not (len(raw) == 1 and raw.isupper())
 
 
-def _sentences_of(flat_text: str) -> list[tuple[int, str]]:
-    """(offset, sentence) pairs indexing the *flattened* text."""
+def _sentences_of(flat_text: str, breaks=()) -> list[tuple[int, str]]:
+    """(offset, sentence) pairs indexing the *flattened* text.
+
+    ``breaks`` are offsets a sentence may not run across (see ``_Flat.breaks``).
+    """
     sentences: list[tuple[int, str]] = []
-    start = 0
-    for match in _SENT_END.finditer(flat_text):
-        if not _is_real_boundary(flat_text, match.start(1)):
-            continue
-        end = match.end(1)
-        chunk = flat_text[start:end].strip()
-        if chunk:
-            sentences.append((start, chunk))
-        start = match.end()
-    tail = flat_text[start:].strip()
-    if tail:
-        sentences.append((start, tail))
+    edges = [0, *breaks, len(flat_text)]
+    for block_start, block_end in zip(edges, edges[1:]):
+        start = block_start
+        for match in _SENT_END.finditer(flat_text, block_start, block_end):
+            if not _is_real_boundary(flat_text, match.start(1)):
+                continue
+            end = match.end(1)
+            chunk = flat_text[start:end].strip()
+            if chunk:
+                sentences.append((start, chunk))
+            start = match.end()
+        tail = flat_text[start:block_end].strip()
+        if tail:
+            sentences.append((start, tail))
     return sentences
 
 
@@ -207,7 +239,87 @@ def split_sentences(text: str) -> list[tuple[int, str]]:
     splitter works on internally.
     """
     flat = _Flat(text)
-    return [(flat.origin(offset), sentence) for offset, sentence in _sentences_of(flat.text)]
+    return [
+        (flat.origin(offset), sentence)
+        for offset, sentence in _sentences_of(flat.text, flat.breaks)
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Block structure
+# --------------------------------------------------------------------------- #
+#
+# A list item and a section heading end without a full stop, and what follows
+# them often opens with a glyph or a number instead of a capital. Punctuation
+# alone therefore reads a heading, a bulleted list and the paragraph either side
+# of them as one sentence, and every citation in that stretch is then judged
+# against all of it. The line breaks still say where those blocks begin.
+
+# Word's list glyphs arrive as private-use code points (Symbol and Wingdings
+# have no Unicode mapping); the rest are the bullets typeset as themselves.
+_BULLET = re.compile("[-•‣⁃∙◦▪▫■□●○◆◇➢➤►▶✓✔❖]\\s*")
+# A dash or an asterisk opens a list item or a footnote, but a dash also opens
+# a wrapped line mid-sentence, so these count only after a finished sentence.
+_SOFT_BULLET = re.compile(r"[-–—*]\s+(?=\S)")
+_CLOSES_SENTENCE = re.compile(r"[.!?:][\"'’”\)\]]*\s*$")
+_BARE_NUMBER = re.compile(r"\d{1,4}")
+# "2 RELATED WORK", "4.2.1 Local Diarization Pipeline", "IV. Results".
+_SECTION_NUMBER = re.compile(r"(?:\d{1,2}(?:\.\d{1,2}){0,3}\.?|[IVX]{1,5}\.)\s+(?=[A-Z])")
+_SUBSECTION_NUMBER = re.compile(r"\d{1,2}(?:\.\d{1,2}){1,3}\.?\s")
+_BARE_SECTION = re.compile(r"\d{1,2}(?:\.\d{1,2}){0,3}\.?")
+
+
+def _closes_sentence(line: str) -> bool:
+    return bool(_CLOSES_SENTENCE.search(line))
+
+
+def _is_heading(line: str, closed: bool, following: str) -> bool:
+    """Is this line a section heading standing between two blocks of prose?
+
+    A heading is short, title-cased, unpunctuated, and followed by the start of
+    something new. A wrapped line of prose can be any one of those, which is why
+    it must also sit after a finished sentence — unless it carries a subsection
+    number, which running text does not open a line with.
+    """
+    if len(line) > 100 or line[-1] in ".,;:!?":
+        return False
+    if following and not (following[0].isupper() or following[0].isdigit()
+                          or _BULLET.match(following)):
+        return False
+    if _BARE_SECTION.fullmatch(line):
+        # The number set on a line of its own, above the heading it belongs to.
+        return closed and bool(following) and _is_heading(following, True, "")
+    number = _SECTION_NUMBER.match(line)
+    words = _WORD.findall(line[number.end():] if number else line)
+    weighty = [w for w in words if w.lower() not in _THIN and len(w) > 2]
+    if not weighty or len(words) > 14 or (not number and len(words) < 2):
+        return False
+    if all(w.isupper() for w in weighty):
+        # "1 INTRODUCTION". Nobody wraps a line of prose into solid capitals.
+        return True
+    titled = sum(1 for w in weighty if w[0].isupper()) / len(weighty)
+    if number and _SUBSECTION_NUMBER.match(line):
+        return titled >= 0.6
+    return closed and titled >= (0.6 if number else 0.8)
+
+
+def _without_page_numbers(lines: list[tuple[int, str]], page_of_offset) -> list[tuple[int, str]]:
+    """Drop the folio printed at the head or foot of each page.
+
+    Left in, it lands mid-paragraph — "misattribution. 3 Modern frameworks" —
+    where the digit stops the splitter seeing the sentence that ended before it.
+    A bare number is only a folio when it is the first or last line of its page.
+    """
+    kept: list[tuple[int, str]] = []
+    for index, (start, chunk) in enumerate(lines):
+        if _BARE_NUMBER.fullmatch(chunk):
+            page = page_of_offset(start)
+            first = index == 0 or page_of_offset(lines[index - 1][0]) != page
+            last = index + 1 == len(lines) or page_of_offset(lines[index + 1][0]) != page
+            if first or last:
+                continue
+        kept.append((start, chunk))
+    return kept
 
 
 # --------------------------------------------------------------------------- #
@@ -505,11 +617,11 @@ def extract_citations(body_text: str, page_of_offset=None) -> list[Citation]:
     ``page_of_offset`` maps a character offset back to a page number; when it is
     omitted every citation is reported on page 1.
     """
-    flat = _Flat(body_text)
+    flat = _Flat(body_text, page_of_offset)
     citations: list[Citation] = []
     hits = {"numeric": 0, "author-year": 0, "alpha": 0}
 
-    for sent_offset, sentence in _sentences_of(flat.text):
+    for sent_offset, sentence in _sentences_of(flat.text, flat.breaks):
         markers = _markers_in(sentence)
         if not markers:
             continue

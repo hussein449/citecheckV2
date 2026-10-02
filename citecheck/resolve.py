@@ -340,6 +340,8 @@ def resolve(ref: Reference, contact_email: str = "") -> ResolvedSource:
     _enrich_openalex(src, ref, email)
     if not src.abstract or not src.oa_url:
         _enrich_semantic_scholar(src)
+    if not src.indices_hit and not src.identifier_printed:
+        _lookup_arxiv_by_title(src, ref)
 
     # Unpaywall and Europe PMC exist purely to turn an abstract-only reference
     # into a full-text one. Europe PMC in particular hands back machine-readable
@@ -628,6 +630,61 @@ def _enrich_arxiv(src: ResolvedSource, arxiv_id: str) -> None:
     # A withdrawn id still returns a feed entry, just an empty one, so presence
     # of the query alone proves nothing — the title is what confirms the paper.
     _record(src, "arXiv", resp, found=bool(src.title))
+
+
+def _lookup_arxiv_by_title(src: ResolvedSource, ref: Reference) -> None:
+    """Last resort for an entry no index matched: is it an arXiv preprint?
+
+    Conference papers from venues that register no DOIs (ICLR, most of NeurIPS)
+    are in Crossref not at all and in OpenAlex only as the preprint, whose
+    record there is not always under the right title. arXiv itself is. It is no
+    general index, so finding nothing here is not recorded as a miss.
+    """
+    title = ref.title or ""
+    if len(title) < 12:
+        return
+    phrase = " ".join(re.sub(r"[^A-Za-z0-9 ]", " ", title).split())
+    resp = _get("http://export.arxiv.org/api/query",
+                params={"search_query": f'ti:"{phrase}"', "max_results": 3})
+    if not resp or resp.status_code != 200:
+        return
+    best, score = None, -1.0
+    for entry in re.findall(r"<entry>(.*?)</entry>", resp.text, re.S):
+        found = re.search(r"<title>(.*?)</title>", entry, re.S)
+        ident = re.search(r"<id>\s*https?://arxiv\.org/abs/([^<\s]+?)(?:v\d+)?\s*</id>", entry)
+        if not (found and ident):
+            continue
+        candidate = _agreement(
+            src, ref, re.sub(r"\s+", " ", found.group(1)).strip(),
+            ", ".join(re.findall(r"<name>(.*?)</name>", entry, re.S)[:6]),
+        )
+        if candidate > score:
+            best, score = (entry, ident.group(1), found), candidate
+    if best is None or score < _SAME_WORK_AGREEMENT:
+        return
+
+    entry, arxiv_id, found = best
+    src.arxiv_id = arxiv_id
+    src.title = re.sub(r"\s+", " ", found.group(1)).strip()
+    src.url = f"https://arxiv.org/abs/{arxiv_id}"
+    src.oa_url = f"https://arxiv.org/pdf/{arxiv_id}"
+    summary = re.search(r"<summary>(.*?)</summary>", entry, re.S)
+    if summary and not src.abstract:
+        src.abstract = re.sub(r"\s+", " ", summary.group(1)).strip()
+    published = re.search(r"<published>\s*(\d{4})", entry)
+    _note_record(
+        src, "arXiv", src.title, published.group(1) if published else "",
+        [_surname(n) for n in re.findall(r"<name>(.*?)</name>", entry, re.S)],
+    )
+    src.search_agreement = round(score, 3)
+    src.resolver = "arxiv-search"
+    src.confidence = round(min(0.9, 0.2 + score * 0.75), 2)
+    src.hit("arXiv")
+    src.notes.append(
+        f"No DOI or arXiv id was printed for this reference, so it was matched "
+        f"to the arXiv preprint “{src.title[:70]}” by title search (agreement "
+        f"{score:.2f}). Check the title above matches what you cited."
+    )
 
 
 def _surname(full_name: str) -> str:
