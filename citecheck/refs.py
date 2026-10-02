@@ -617,6 +617,11 @@ _VANCOUVER_RUN = re.compile(
     rf"(?:{_VANCOUVER_AUTHOR}|et\s+al)"         # the last one, or "et al."
     rf"(?:\s*,\s*(?:editors?|eds?))?\.)"        # edited books name their editors
 )
+_AUTHORS_COMMA_YEAR = re.compile(
+    rf"^\s*({_NAME}(?:\s+{_NAME})?,\s+[{_U}]\.[{_L}\s.,&'’{_DASH}]{{0,400}}?),\s*"
+    rf"(?:19|20)\d{{2}}[a-z]?,\s+([{_U}].{{6,}})$",
+    re.S,
+)
 _INITIALED = rf"(?:[{_U}]\.(?:\s*-?\s*[{_U}]\.)*\s*)+{_NAME}(?:\s+{_NAME})?"
 _INITIALS_THEN_STOP = re.compile(
     # "A. One", "A. One and B. Two", "A. One, B. Two, and C. Three" — then a stop.
@@ -687,6 +692,19 @@ def _split_fields(raw: str) -> tuple[str, str, str]:
 
     # Style B -- "Surname, A., Surname, B. Title. Venue, 2019."
     # Style B' -- "A. Surname, B. Surname, Title. Venue (2019)."
+    # Style R -- "Fu, L., C. L. Kane, and E. J. Mele, 2007, Phys. Rev. Lett. 98,
+    # 106803." Reviews of Modern Physics: authors, then the year between
+    # commas, then the journal. No title is printed at all, so there is none
+    # to find, and what the other styles make of it is a fragment of the
+    # author list.
+    m = _AUTHORS_COMMA_YEAR.match(stripped)
+    if m:
+        rest = m.group(2).strip()
+        # A book has its title where an article has its journal and volume.
+        book = not re.match(r"[^,(]*\d", rest)
+        title = re.split(r"\s*\(", rest)[0].strip(" .,") if book else ""
+        return m.group(1).strip(" .,;&"), title, rest[:200]
+
     # Style I -- "Y. Bengio, P. Simard, and P. Frasconi. Title. Venue, 1994."
     # Initials first and no quotation marks: the last author ends on a full
     # stop, not a comma, so the run below stops one author short and the title
@@ -832,7 +850,7 @@ _ENTRY_HEAD = re.compile(
 # contain are the ones after an initial, "et al." or "Jr.". Any other period
 # ends a sentence, which means the text before it was a title or a venue.
 _YEAR_SENTENCE_AUTHORS = (
-    rf"(?:[{_L}\s,;&'’{_DASH}]"
+    rf"(?:[{_L}\s,;&'’‘`´{_DASH}]"
     rf"|(?<=\b[{_U}])\.|(?<=\bal)\.|(?<=\b[JS]r)\.){{0,400}}?"
 )
 _YEAR_SENTENCE = r"\.\s+(?:19|20)\d{2}[a-z]?\.\s"
@@ -856,6 +874,9 @@ _NOT_AN_AUTHOR = (
     r"Technical|Tech|Available|Oral|Note|Also|Online|Association|Advances|Preprint|"
     r"Unpublished|Submitted|To|Software|Version|Retrieved|Accessed|Cambridge|Oxford)\b)"
 )
+# A given name (or more) and a surname, with middle initials: "Don Towsley",
+# "Michael M Bronstein", "Alán Aspuru-Guzik".
+_FULL_NAME = rf"{_NAME}(?:\s+(?:{_NAME}|[{_U}]\.?(?=\s))){{1,3}}"
 _YEAR_TERMINATED_HEAD = re.compile(
     # after "...2011." — any run of name words, given names first or surname
     # first, that goes on to a comma, an "and", or straight into a title
@@ -863,8 +884,15 @@ _YEAR_TERMINATED_HEAD = re.compile(
     rf"(?={_NOT_AN_AUTHOR}(?:[{_U}]\.\s*){{0,3}}{_NAME}(?:\s+(?:{_NAME}|[{_U}]\.?(?=[\s,]))){{0,3}}"
     rf"(?:,|\s+and\s|\.\s+[{_U}]))"
     # after any other full stop — only an unmistakable author list
-    rf"|(?<=[{_L})\d]\.)(?<!\b[{_U}]\.)\s+(?={_NOT_AN_AUTHOR}{_NAME}(?:\s+{_NAME})?,\s+"
-    rf"(?:[{_U}]\.,?\s|{_NAME},\s+{_NAME},\s+{_NAME}))"
+    # (a page number may sit between the two entries here as well)
+    rf"|(?<=[{_L})\d]\.)(?<!\b[{_U}]\.)\s+(?:\d{{1,3}}\s+)?(?={_NOT_AN_AUTHOR}{_NAME}(?:\s+{_NAME})?,\s+"
+    rf"(?:[{_U}]\.,?\s|{_NAME},\s+{_NAME},\s+{_NAME}|{_NAME}(?:\s+[{_U}]\.?)?\s+and\s+{_NAME},))"
+    # "Cheng P., C. Song, ...": the surname's comma dropped
+    rf"|(?<=[{_L})\d]\.)(?<!\b[{_U}]\.)\s+(?:\d{{1,3}}\s+)?(?={_NOT_AN_AUTHOR}{_NAME}\s+[{_U}]\.,\s+[{_U}]\.)"
+    # ...or full names joined by "and", closing on a stop: "James Atwood and
+    # Don Towsley. Diffusion-convolutional ..."
+    rf"|(?<=[{_L})\d]\.)(?<!\b[{_U}]\.)\s+(?:\d{{1,3}}\s+)?(?={_NOT_AN_AUTHOR}{_FULL_NAME}(?:,\s+{_FULL_NAME}){{0,12}}"
+    rf",?\s+and\s+{_FULL_NAME}\.\s+[{_U}])"
 )
 # "Duchi, John, Hazan, Elad, and Singer, Yoram": nothing but names.
 _NAME_LIST = re.compile(
@@ -986,7 +1014,11 @@ def _author_total(ref: Reference) -> int:
 def _label_total(label: str) -> int:
     if re.search(r"\bet\s+al\b", label):
         return 3
-    return 2 if re.search(r"\band\b|&", label) else 1
+    if not re.search(r"\band\b|&", label):
+        return 1
+    # "Fu and Kane, 2007" names two; "Fu, Kane and Mele, 2007" names three.
+    names = re.split(r"(?:19|20)\d{2}", label)[0]
+    return 3 if names.count(",") >= 2 else 2
 
 
 def _split_shared_key(key: str, grouped: dict[str, list], references: list[Reference]) -> dict[str, Reference]:
@@ -1001,18 +1033,24 @@ def _split_shared_key(key: str, grouped: dict[str, list], references: list[Refer
     candidates = [r for r in references if r.key == key]
     if len(candidates) < 2:
         return {}
-    by_total: dict[int, list] = {}
+    by_total: dict[tuple[int, str], list] = {}
     for cite in grouped[key]:
-        by_total.setdefault(_label_total(getattr(cite, "label", "")), []).append(cite)
+        label = getattr(cite, "label", "")
+        total = _label_total(label)
+        # "Fu and Berg, 2009" against "Fu and Kane, 2009": the second name.
+        second = re.search(r"(?:\band\b|&)\s+([^\W\d][\w'’\-]+)", label) if total == 2 else None
+        by_total.setdefault((total, second.group(1).lower() if second else ""), []).append(cite)
 
     resolved: dict[str, Reference] = {}
     left = []
-    for total, cites in by_total.items():
-        fitting = [r for r in candidates if _author_total(r) == total]
+    for (total, second), cites in by_total.items():
+        fitting = [r for r in candidates if r.key == key and _author_total(r) == total]
+        if len(fitting) > 1 and second:
+            fitting = [r for r in fitting if second in (r.authors or r.raw[:200]).lower()]
         if len(fitting) != 1:
             left.extend(cites)
             continue
-        new_key = f"{key}/{total}"
+        new_key = f"{key}/{total}" + (f"-{second}" if second else "")
         fitting[0].key = new_key
         for cite in cites:
             cite.key = new_key

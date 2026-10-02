@@ -119,6 +119,8 @@ _LOOSE_ACCENT = re.compile(
 
 
 _LOOSE_CEDILLA = re.compile("([cCsStT])\u00b8 ?(?=[a-z])")
+# A grave accent drawn as a backtick inside a word: "Rodol`a".
+_LOOSE_GRAVE = re.compile("(?<=[A-Za-z])`([aeiouAEIOU])")
 
 
 def _compose_accents(text: str) -> str:
@@ -131,6 +133,9 @@ def _compose_accents(text: str) -> str:
     text = _LOOSE_ACCENT.sub(compose, text)
     # The cedilla is drawn after its letter, and sometimes with a gap before
     # the rest of the word: "Gülc¸ehre, C¸ aglar".
+    text = _LOOSE_GRAVE.sub(
+        lambda m: unicodedata.normalize("NFC", m.group(1) + "\u0300"), text
+    )
     return _LOOSE_CEDILLA.sub(
         lambda m: unicodedata.normalize("NFC", m.group(1) + "\u0327"), text
     )

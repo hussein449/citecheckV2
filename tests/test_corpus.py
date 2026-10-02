@@ -93,6 +93,22 @@ CORPUS = {
     #   still imperfect: wrapped author lists are cut at the line break
     "jss_author_year": ("arxiv_1406.5823.pdf", "author-year", 34, 27, 5),
     "numeric_long": ("arxiv_1802.03426.pdf", "numeric", 65, 65, 0),
+    # A fourth unseen batch.
+    "nips_numeric_2": ("arxiv_1409.3215.pdf", "numeric", 31, 31, 0),
+    "cvpr_numeric_2": ("arxiv_1506.02640.pdf", "numeric", 39, 39, 0),
+    #   page numbers between "Surname, Given" entries; an entry ending "Accessed: ..."
+    "page_numbers_in_list": ("arxiv_1511.06434.pdf", "author-year", 37, 36, 0),
+    "alpha_labels_plus": ("arxiv_1707.06347.pdf", "alpha", 14, 14, 0),
+    "nips_given_first": ("arxiv_1312.5602.pdf", "numeric", 26, 26, 0),
+    "icml_initials": ("arxiv_1905.11946.pdf", "author-year", 52, 52, 0),
+    #   entries following a URL or "Software available from ..." tail
+    "given_first_after_url": ("arxiv_1710.10903.pdf", "author-year", 44, 44, 0),
+    #   Rev. Mod. Phys.: "Fu, L., and C. L. Kane, 2007, Phys. Rev. B 76, 045302."
+    #   Still imperfect: same-year entries the list does not letter, and
+    #   "Bernevig, Hughes and Zhang (2006)" read from its second author.
+    "rmp_author_comma_year": ("arxiv_1002.3895.pdf", "author-year", 181, 150, 20),
+    "long_author_year_review": ("arxiv_1206.5538.pdf", "author-year", 227, 220, 0),
+    "acl_editors_entry": ("arxiv_1907.11692.pdf", "author-year", 51, 50, 0),
     "minimal": ("test_paper.pdf", "numeric", 5, 5, 0),
 }
 
@@ -149,11 +165,12 @@ def _make(name, suffix, style, min_refs, min_cited, max_orphans):
             f"{name}: {len(orphans)} markers matched nothing: {sorted(orphans)[:10]}",
         )
         # Every linked reference has to be checkable: something to search for
-        # and a year to check it against.
+        # and a year to check it against. Physics journals print no titles, so
+        # there the journal, volume and page are what there is to search by.
         for key, ref in matched.items():
             self.assertTrue(
-                ref.title or ref.doi or ref.url,
-                f"{name}: reference {key} has no title, DOI or URL to resolve",
+                ref.title or ref.doi or ref.url or ref.venue,
+                f"{name}: reference {key} has no title, DOI, URL or venue to resolve",
             )
 
     test.__name__ = f"test_{name}"

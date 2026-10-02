@@ -34,7 +34,10 @@ _SURNAME = rf"{_NAME_WORD}(?:\s+{_NAME_WORD}){{0,2}}"
 # "Smith" / "Smith et al." / "Smith & Jones". "et al." has to stand on its own:
 # unlike "and"/"&" it is never followed by another surname, and requiring one
 # there silently drops every multi-author citation in the paper.
-_AUTHORS = rf"{_SURNAME}(?:\s+et\s+al\.?|\s*(?:and|&)\s*{_SURNAME})?"
+_AUTHORS = (
+    rf"{_SURNAME}(?:,?\s+et\s+al\.?"
+    rf"|(?:\s*,\s*{_NAME_WORD}){{0,3}}\s*,?\s*(?:and|&)\s*{_SURNAME})?"
+)
 
 # Author-year styles: (Smith, 2019) (Smith & Jones 2019; Doe et al., 2020)
 # natbib's "\citep[see, e.g.,][]{...}" puts a lead-in inside the brackets.

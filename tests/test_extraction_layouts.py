@@ -383,6 +383,78 @@ class PageNumberIsNotALabelTest(unittest.TestCase):
         )
 
 
+class EntryAfterANonYearStopTest(unittest.TestCase):
+    """An entry that does not close on its year still has one after it."""
+
+    def keys(self, text):
+        return [r.key for r in refs.parse_references(text)]
+
+    def test_surname_given_pair_after_an_access_date(self):
+        self.assertEqual(self.keys("""
+            Mordvintsev, Alexander, Olah, Christopher, and Tyka, Mike. Inceptionism: Going deeper into
+            neural networks. http://googleresearch.blogspot.com/2015/06/x.html. Accessed: 2015-06-17.
+
+            Nair, Vinod and Hinton, Geoffrey E. Rectified linear units improve restricted boltzmann
+            machines. In Proceedings of ICML, pp. 807-814, 2010.
+
+            Zeiler, Matthew D and Fergus, Rob. Visualizing and understanding convolutional networks. 2014.
+        """), ["mordvintsev2015", "nair2010", "zeiler2014"])
+
+    def test_given_name_first_after_a_url_or_note(self):
+        self.assertEqual(self.keys("""
+            Martín Abadi, Ashish Agarwal, and Xiaoqiang Zheng. TensorFlow: Large-scale machine learning on
+            heterogeneous systems, 2015. URL https://www.tensorflow.org/. Software available from tensorflow.org.
+
+            James Atwood and Don Towsley. Diffusion-convolutional neural networks. In Advances in Neural
+            Information Processing Systems, pp. 1993-2001, 2016.
+
+            Yedid Hoshen. Vain: Attentional multi-agent predictive modeling. In NIPS 30, 2017. URL http://papers.nips.cc/paper/6863.pdf.
+
+            Simon Jégou, Michal Drozdzal, and Yoshua Bengio. The one hundred layers tiramisu. In Workshop on Computer Vision, 2017.
+        """), ["abadi2015", "atwood2016", "hoshen2017", "jgou2017"])
+
+
+class ReviewsOfModernPhysicsTest(unittest.TestCase):
+    """ "Fu, L., and C. L. Kane, 2007, Phys. Rev. B 76, 045302." — no titles at all."""
+
+    TEXT = """
+        Anderson, P. W., 1958, Phys. Rev. 109, 1492.
+        Das Sarma, S., C. Nayak, and S. Tewari, 2006, Phys. Rev. B 73, 220502(R).
+        21
+        De Gennes, P. G., 1966, Superconductivity of Metals and Alloys (W. A. Benjamin, New York).
+        Fu, L., and E. Berg, 2009, Phys. Rev. Lett. 105, 097001.
+        Fu, L. and C. L. Kane, 2009, Phys. Rev. B 79, 161408(R).
+        Fu, L., C. L. Kane, and E. J. Mele, 2007, Phys. Rev. Lett. 98, 106803.
+    """
+
+    def setUp(self):
+        self.parsed = refs.parse_references(self.TEXT)
+
+    def test_entries_split_across_the_page_number(self):
+        self.assertEqual(len(self.parsed), 6)
+        self.assertEqual(self.parsed[2].authors, "De Gennes, P. G")
+
+    def test_the_whole_author_list_is_the_authors(self):
+        self.assertEqual(self.parsed[5].authors, "Fu, L., C. L. Kane, and E. J. Mele")
+        self.assertEqual(self.parsed[5].title, "")
+        self.assertEqual(self.parsed[2].title, "Superconductivity of Metals and Alloys")
+
+    def test_second_author_tells_same_year_pairs_apart(self):
+        text = (
+            "Majorana modes were proposed (Fu and Kane, 2009) and odd parity pairing too (Fu and Berg, 2009). "
+            "Three authors wrote the model (Fu, Kane and Mele, 2007); see also (Sau, et al., 2010)."
+        )
+        citations = intext.extract_citations(text)
+        self.assertIn("sau2010", {c.key for c in citations})
+        matched, orphans = refs.link_citations(
+            intext.group_by_reference(citations), refs.index_references(self.parsed), self.parsed
+        )
+        linked = {r.raw[:22] for r in matched.values()}
+        self.assertEqual(
+            linked, {"Fu, L. and C. L. Kane,", "Fu, L., and E. Berg, 2", "Fu, L., C. L. Kane, an"}
+        )
+
+
 class WrappedYearTest(unittest.TestCase):
     def test_years_on_their_own_line_are_not_running_headers(self):
         """ "(1916)." and "(1918)." on one page are not a header seen twice."""
